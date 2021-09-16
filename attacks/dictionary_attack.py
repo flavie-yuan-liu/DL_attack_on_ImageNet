@@ -426,7 +426,7 @@ def sadil(dataset, model, targeted=True, nepochs=1e3, batchsize=1, lambdaCoding=
                 v[ind] = prox_l1(v[ind] - stepsize * grad_v[ind])
 
         loss.append(loss_all(dataLoader, model, v))
-        if abs(loss[-1]-loss[-2]<1e-6):
+        if abs(loss[-1]-loss[-2])<1e-6:
             break
 
     path = f"/home/flavie2/Desktop/attack_learning/Sparse_Dictionary_Attack/dict_model_ImageNet/"
