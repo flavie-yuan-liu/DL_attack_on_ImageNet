@@ -118,7 +118,7 @@ def constraint_dict(D, constr_set='l2ball', ortho=False):
 
 def fit_laplace(v, label=None, pred=None, conditioned='labels_atoms', device=torch.device('cpu')):
     # the method of attack generation among ['predictions_atoms', 'labels_atoms', 'atoms', 'none']
-    mean, scale = fit_laplace_aux(v, label, pred=pred, conditioned=conditioned, device=device)
+    mean, scale = fit_laplace_aux(v, label=label, pred=pred, conditioned=conditioned, device=device)
     return mean, scale
 
 
@@ -396,121 +396,6 @@ def adil(dataset, model, targeted=True, niter=1e3, lambdaCoding=1., l2_fool=1., 
                 loss_all[iteration] = loss_full
 
     return d, v, loss_all
-
-
-def sadil(dataset, model, targeted=True, nepochs=1e3, batchsize=1, lambdaCoding=1., l2_fool=1., stepsize=1.,
-          n_atom=5, dict_set='l2ball', device=torch.device("cpu"), model_file=None):
-    #
-    # SADiL: Stochastic Adversarial Dictionary Learning
-    #   - Stochastic version
-    #   - Algorithm implemented based on SPRING [Driggs et al., 2021]
-    #
-    # dataset: dataset to attack
-    # classifier: model to fool
-    # nepochs: number of epochs
-    # batchsize: number of images treated at each iteration
-
-    # Parameters (number of images, dimension of images (3 channels))
-    nimg = len(dataset)
-    x, _ = next(iter(dataset))
-    nc, nx, ny = x.shape
-
-    # Dataloader
-    dataLoader = torch.utils.data.DataLoader(dataset, batch_size=batchsize, shuffle=False)
-
-    # Targeted vs. Untargeted attacks
-    coeff = 1. if targeted else -1.
-
-    def get_target(img, label, targeted, classifier):
-        with torch.no_grad():
-            if targeted:
-                f_x = classifier(img)
-                _, index = f_x.sort()
-                return index[:, -2]
-            else:
-                return label
-
-    # Slices of index
-    indices = get_slices(nimg, batchsize)
-
-    # Function
-    criterion = nn.CrossEntropyLoss(reduction='sum')
-    prox_l1 = get_prox_l1(param=stepsize * lambdaCoding)
-
-    # Initialization
-    D = torch.randn(3, nx, ny, n_atom, device=device)
-    D = constraint_dict(D, constr_set=dict_set)
-    v = torch.zeros(nimg, n_atom, device=device)
-
-    def loss_all(loader, model, v):
-        loss = 0
-        for index, (x, y) in enumerate(loader):
-            x, y = x.to(device=device), y.to(device=device)
-            ind = indices[index]
-            Dv = torch.tensordot(v[ind], D, dims=([1], [3]))
-            loss += (coeff * criterion(model(x + Dv), get_target(x, y, targeted, model))
-                     + .5 * l2_fool * torch.sum(Dv ** 2)).item()
-        loss = loss + (lambdaCoding * torch.sum(torch.abs(v))).item()
-        return loss
-
-    loss = [loss_all(dataLoader, model, v)]
-
-    # Algorithm (we can improve the visibility by defining an optimizer)
-    bar = trange(int(nepochs))
-    for _ in bar:
-
-        for index, (x, y) in enumerate(dataLoader):
-            x, y = x.to(device=device), y.to(device=device)
-            ind = indices[index]
-
-            # ---------- D-STEP ---------- #
-
-            # Prepare computation graph
-            v.detach()
-            D.detach()
-            D.requires_grad = True
-
-            # Compute the loss
-            Dv = torch.tensordot(v[ind], D, dims=([1], [3]))
-            loss_smooth = coeff * criterion(model(x + Dv),
-                                            get_target(x, y, targeted, model)) + .5 * l2_fool * torch.sum(Dv ** 2)
-
-            # Gradient computation & memory
-            loss_smooth.backward()
-            grad_D = D.grad.data
-
-            # Forward-Backward step
-            with torch.no_grad():
-                D = D - stepsize * grad_D
-                D = constraint_dict(D, constr_set=dict_set)
-
-            # ---------- V-STEP ---------- #
-
-            # Prepare computation graph
-            v.detach()
-            D.detach()
-            v.requires_grad = True
-
-            # Compute the loss
-            Dv = torch.tensordot(v[ind], D, dims=([1], [3]))
-            loss_smooth = coeff * criterion(model(x + Dv),
-                                            get_target(x, y, targeted, model)) + .5 * l2_fool * torch.sum(Dv ** 2)
-
-            # Gradient computation
-            loss_smooth.backward()
-            grad_v = v.grad.data
-
-            # Forward-Backward step
-            with torch.no_grad():
-                v[ind] = prox_l1(v[ind] - stepsize * grad_v[ind])
-
-        loss.append(loss_all(dataLoader, model, v))
-        if abs(loss[-1]-loss[-2]) < 1e-6:
-            break
-
-    torch.save([D, loss], model_file)
-
-    return D, v, _
 
 
 def sadil_updated(dataset, model, targeted=True, nepochs=1e3, batchsize=1, lambdaCoding=1., l2_fool=1., stepsize=1.,
