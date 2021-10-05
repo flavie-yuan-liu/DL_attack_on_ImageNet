@@ -5,8 +5,9 @@ import torchvision.models as models
 from torch.utils.data import random_split
 from attacks import ADILR, ADIL
 import numpy as np
-import simulations.performance as perf
+import performance as perf
 from DS_ImageNet import DS_ImageNet
+from imagenet_loading import load_ImageNet, dataset_split_by_class
 import torchattacks
 import random
 import torchmetrics
@@ -96,13 +97,16 @@ def main(args):
     # hyper-parameter selecting
     # ----------------------------------------------------------------------
 
-    lambda_grid_l1 = np.logspace(start=-4, stop=-4, num=1)
-    lambda_grid_l2 = np.logspace(start=-4, stop=-4, num=1)
-    n_atoms_grid = np.array([100])
-    log_grid_small = np.logspace(start=-3, stop=-1, num=4)
-    log_grid_step_size = np.logspace(start=-3, stop=-1, num=3)
-    eps = 10/255
+    # lambda_grid_l1 = np.logspace(start=-4, stop=-4, num=1)
+    # lambda_grid_l2 = np.logspace(start=-4, stop=-4, num=1)
+    n_atoms_grid = np.array([1])
+    # log_grid_small = np.logspace(start=-3, stop=-1, num=4)
+    # log_grid_step_size = np.logspace(start=-3, stop=-1, num=3)
+    eps = 8/255
     norm = 'linf'
+
+    # eps = [0.5]
+    # norm = 'l2'
 
     '''
     FGSM(model, eps=8/255),
@@ -131,35 +135,28 @@ def main(args):
     '''
 
     attacks_hyper = {
-        # 'ADiL': perf.get_atks(model.to(device), ADIL, 'lambda_l1', lambda_grid_l1, 'lambda_l2', lambda_grid_l2,
+        # 'ADiLR': perf.get_atks(model.to(device), ADILR, 'lambda_l1', lambda_grid_l1, 'lambda_l2', lambda_grid_l2,
         #                       'n_atoms', n_atoms_grid, version='stochastic', data_train=train_dataset, device=device,
         #                       batch_size=100, model_name=model_name, steps=150, attack_conditioned='atoms'),
-        'adil': ADIL(model=model, data_train=train_dataset, norm=norm, eps=budget, n_atoms=5, steps=100, trials=10,
-                    targeted=False),
+        'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, data_train=train_dataset, norm=norm,
+                              eps=eps, n_atoms=5, steps=200, trials=10, targeted=False, batch_size=128,
+                              model_name=model_name),
         # --------------------------------------- Other attacks --------------------------------------------- #
         # 'DeepFool': perf.get_atks(model.to(device), torchattacks.DeepFool, steps=100),
-        'CW': perf.get_atks(model.to(device), torchattacks.CW, 'c', log_grid_small, steps=100),
-        'FGSM': perf.get_atks(model.to(device), torchattacks.FGSM, eps=eps),
-        'FFGSM': perf.get_atks(model.to(device), torchattacks.FFGSM, alpha=12/255, eps=eps),
+        # 'CW': perf.get_atks(model.to(device), torchattacks.CW, 'c', log_grid_small, steps=100),
+        # 'FGSM': perf.get_atks(model.to(device), torchattacks.FGSM, eps=eps),
+        # 'FFGSM': perf.get_atks(model.to(device), torchattacks.FFGSM, alpha=12/255, eps=eps),
         # --------------------------------- Attacks with l2-ball constraint --------------------------------- #
         # Optimal since eps = radius of ball ** 2
-        'PGDL2': perf.get_atks(model.to(device), torchattacks.PGDL2, alpha=0.2, eps=eps, steps=100),
-        'APGD-L2-ce': perf.get_atks(model.to(device), torchattacks.APGD, loss='ce', norm='L2', eps=eps),
-        'AutoAttack-L2': perf.get_atks(model.to(device), torchattacks.AutoAttack, norm='L2', eps=eps),
+        # 'PGDL2': perf.get_atks(model.to(device), torchattacks.PGDL2, alpha=0.2, eps=eps, steps=100),
+        # 'APGD-L2-ce': perf.get_atks(model.to(device), torchattacks.APGD, loss='ce', norm='L2', eps=eps),
+        # 'AutoAttack-L2': perf.get_atks(model.to(device), torchattacks.AutoAttack, norm='L2', eps=eps),
     }
 
     print('Evaluation process')
-    budget = [4 / 255, 8 / 255, 16 / 255]
-    attacks, validation_perf, validation_perf_tmp = perf.select_hyperparameter(attacks_hyper, model=model,
-                                                                               data=val_loader,
-                                                                               budget=budget,
-                                                                               criterion='mse_limit',
-                                                                               device=device)
-
- #   print(validation_perf_tmp['fooling_rate'], validation_perf_tmp['mse'], validation_perf_tmp['rmse'])
-
-    param_selection_file = 'dict_model_ImageNet/model_comparaison.bin'
-    torch.save([attacks, validation_perf, validation_perf_tmp], param_selection_file)
+    val_perf = perf.get_performance(attacks_hyper, model, val_loader, device=device)
+    param_selection_file = 'dict_model_ImageNet_version_constrained/model_comparaison.bin'
+    torch.save(val_perf, param_selection_file)
 
 
 if __name__ == '__main__':

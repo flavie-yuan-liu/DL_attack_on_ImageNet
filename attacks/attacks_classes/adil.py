@@ -1,5 +1,6 @@
 from attacks.utils import *
 import torch
+import os
 
 
 class ADIL(Attack):
@@ -28,7 +29,8 @@ class ADIL(Attack):
     """
 
     def __init__(self, model, eps=None, steps=1e2, norm='L2', targeted=False, n_atoms=10, batch_size=None,
-                 data_train=None, step_size=None, trials=10, attack='unsupervised', estimate_step_size=False):
+                 data_train=None, step_size=None, trials=10, attack='unsupervised', model_name=None,
+                 estimate_step_size=False):
         super().__init__("ADIL", model.eval())
         # Attack parameters
         self.norm = norm.lower()
@@ -45,6 +47,10 @@ class ADIL(Attack):
         self.step_size = n_atoms if step_size is None else step_size
         self.batch_size = batch_size
         self.loss = None
+
+        path = f"dict_model_ImageNet_version_constrained/"
+        model_file = f"ImageNet_{model_name}_num_atom_{self.n_atoms}_nepoch_{self.steps}.bin"
+        self.model_file = os.path.join(path, model_file)
 
         # Learn dictionary
         if data_train is not None:
@@ -158,28 +164,28 @@ class ADIL(Attack):
                     with torch.no_grad():
                         grad_v += v.grad
                         grad_d += d.grad
-                        loss_full += loss
+                        loss_full += loss.item()
 
                 # Forward-Backward step with line-search
                 with torch.no_grad():
 
-                    # Cheap guess of the Lipschitz constant
-                    if self.estimate_step_size:
-                        if iteration <= 1:
-                            lipschitz_old = lipschitz
-                            lipschitz = torch.sqrt(
-                                torch.norm(grad_v - grad_v_old, p='fro') ** 2 + torch.norm(grad_d - grad_d_old,
-                                                                                           p='fro') ** 2)
-                            lipschitz = lipschitz / torch.sqrt(
-                                torch.norm(v - v_old, p='fro') ** 2 + torch.norm(d - d_old, p='fro') ** 2)
-                            lipschitz = lipschitz_old if torch.isinf(lipschitz) else lipschitz
-                            self.step_size = .9 / lipschitz
+                    # # Cheap guess of the Lipschitz constant
+                    # if self.estimate_step_size:
+                    #     if iteration <= 1:
+                    #         lipschitz_old = lipschitz
+                    #         lipschitz = torch.sqrt(
+                    #             torch.norm(grad_v - grad_v_old, p='fro') ** 2 + torch.norm(grad_d - grad_d_old,
+                    #                                                                        p='fro') ** 2)
+                    #         lipschitz = lipschitz / torch.sqrt(
+                    #             torch.norm(v - v_old, p='fro') ** 2 + torch.norm(d - d_old, p='fro') ** 2)
+                    #         lipschitz = lipschitz_old if torch.isinf(lipschitz) else lipschitz
+                    #         self.step_size = .9 / lipschitz
 
                     # Memory
                     d_old.copy_(d)
                     v_old.copy_(v)
-                    grad_v_old.copy_(grad_v)
-                    grad_d_old.copy_(grad_d)
+                    # grad_v_old.copy_(grad_v)
+                    # grad_d_old.copy_(grad_d)
                     loss_old = loss_full
 
                     # Update
@@ -211,10 +217,10 @@ class ADIL(Attack):
                             x = x.to(device=self.device)
                             ind = indices[index]
                             dv = torch.tensordot(v_new[ind], d_new, dims=([1], [3]))
-                            loss_new += coeff * criterion(model(x + dv), target[index])
+                            loss_new += (coeff * criterion(model(x + dv), target[index])).item()
 
                         # Check the sufficient decrease condition
-                        if loss_new <= loss_old + beta * (delta ** index_i) * h:
+                        if loss_new <= loss_old + beta * (delta ** index_i) * h.item():
                             # Then its fine !
                             v = v_new
                             d = d_new
@@ -229,9 +235,7 @@ class ADIL(Attack):
 
                     # Keep track of loss
                     loss_all[iteration] = loss_new
-
-        self.dictionary = d.detach()
-        self.loss = loss_all
+        torch.save([d, loss_all], self.model_file)
 
     def forward(self, images, labels):
 
@@ -239,18 +243,24 @@ class ADIL(Attack):
         labels = labels.to(self.device)
 
         # Check if the dictionary has been learned
-        if self.dictionary is None:
+        if not os.path.exists(self.model_file):
             print('The adversarial dictionary has not been learned.')
             print('It is now being learned on the given dataset')
             dataset = QuickAttackDataset(images=images, labels=labels)
             self.learn_dictionary(dataset=dataset, model=self.model)
 
+        self.dictionary, _ = torch.load(self.model_file)
+
         if self.attack == 'supervised':
             ''' Supervised attack where the coding vectors are optimized '''
-            return self.forward_supervised(images, labels)
+            adv_img = self.forward_supervised(images, labels)
+            self.dictionary = None
+            return adv_img
         else:
             ''' Unsupervised attack where the coding vectors are sampled '''
-            return self.forward_unsupervised(images)
+            adv_img = self.forward_unsupervised(images)
+            self.dictionary = None
+            return adv_img
 
     def forward_unsupervised(self, images):
         """ Unsupervised attack to unseen examples
