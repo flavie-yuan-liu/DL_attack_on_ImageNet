@@ -3,13 +3,12 @@ import os
 import torch
 import torchvision.models as models
 from torch.utils.data import random_split
-from attacks.dictionary_attack import ADIL
+from attacks import ADILR, ADIL
 import numpy as np
 import simulations.performance as perf
 from DS_ImageNet import DS_ImageNet
 import torchattacks
 import random
-from torch.utils.data import Subset
 import torchmetrics
 
 
@@ -23,45 +22,6 @@ class Normalize(torch.nn.Module):
         mean = self.mean.reshape(1, 3, 1, 1)
         std = self.std.reshape(1, 3, 1, 1)
         return (input-mean)/std
-
-
-def dataset_split_by_class(dataset, number_per_class, number_of_classes=1000):
-
-    # number_of_class is list containing two elements,
-    # i.e., number_of_class = [number_per_class_train, number_per_class_val, number_per_class_test]
-
-    samples = dataset.samples
-    labels = [l for (_, l) in samples]
-    sorted_idx = np.argsort(labels)
-    num_classes = len(dataset.classes)
-
-    # this only works for the imagenet validation set with 50 samples per class
-    matrix_sorted_idx = sorted_idx.reshape([num_classes, 50])
-
-    split1 = number_per_class[0]+number_per_class[1]
-    split2 = sum(number_per_class)
-
-    for i in range(matrix_sorted_idx.shape[0]):
-        random.shuffle(matrix_sorted_idx[i, :])
-
-    indices_train = matrix_sorted_idx[:number_of_classes, 0:number_per_class[0]].flatten()
-    indices_val = matrix_sorted_idx[:number_of_classes, number_per_class[0]:split1].flatten()
-    indices_test = matrix_sorted_idx[number_of_classes:, split1:split2].flatten()
-
-    return Subset(dataset, indices_train), Subset(dataset, indices_val), Subset(dataset, indices_test)
-
-
-def load_ImageNet():
-
-    # Set data path for ILSVRC2012 validation set
-    imagenet_file = './data/ImageNet/ImageNet1000_unnormalized.bin'
-
-    # load ImageNet dataset, the validation set is used here for dictionary training
-    dataset = torch.load(imagenet_file)
-    num_data = len(dataset)
-    clsses = dataset.classes
-
-    return dataset, clsses
 
 
 def model_accuracy(dataset, model, device='cpu'):
@@ -142,6 +102,7 @@ def main(args):
     log_grid_small = np.logspace(start=-3, stop=-1, num=4)
     log_grid_step_size = np.logspace(start=-3, stop=-1, num=3)
     eps = 10/255
+    norm = 'linf'
 
     '''
     FGSM(model, eps=8/255),
@@ -173,6 +134,8 @@ def main(args):
         # 'ADiL': perf.get_atks(model.to(device), ADIL, 'lambda_l1', lambda_grid_l1, 'lambda_l2', lambda_grid_l2,
         #                       'n_atoms', n_atoms_grid, version='stochastic', data_train=train_dataset, device=device,
         #                       batch_size=100, model_name=model_name, steps=150, attack_conditioned='atoms'),
+        'adil': ADIL(model=model, data_train=train_dataset, norm=norm, eps=budget, n_atoms=5, steps=100, trials=10,
+                    targeted=False),
         # --------------------------------------- Other attacks --------------------------------------------- #
         # 'DeepFool': perf.get_atks(model.to(device), torchattacks.DeepFool, steps=100),
         'CW': perf.get_atks(model.to(device), torchattacks.CW, 'c', log_grid_small, steps=100),
