@@ -201,7 +201,6 @@ class ADIL(Attack):
                 flag = False
                 index_i_v = 0
                 while not flag and not flag_v:
-
                     v_new = v_old + (delta ** index_i_v) * d_v
                     loss_new = 0
                     for index, (x, _) in enumerate(data_loader):
@@ -394,6 +393,8 @@ class ADIL(Attack):
         adversary = torch.empty(0, device=self.device)
 
         for ind in range(n_img):
+            print(ind, 'th images')
+            ind = 7
             img, label = images[ind, :, :, :].to(self.device), labels[ind].to(self.device)
             # print('{}_th image'.format(ind))
             vi = v[ind]
@@ -448,7 +449,6 @@ class ADIL(Attack):
                 print(self.model(img + dv).softmax(dim=-1).sort().indices[:, -3:])
                 print(self.model(img + dv).softmax(dim=-1).sort().values[:, -3:])
                 print(loss_i_new)
-
 
             # Output
             dv = torch.tensordot(self.projection_v(vi), d, dims=([0], [3]))

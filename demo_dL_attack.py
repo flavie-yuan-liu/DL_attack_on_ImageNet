@@ -69,7 +69,7 @@ def main(args):
     norm_layer = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     model = torch.nn.Sequential(
         norm_layer,
-        model
+        model.eval()
     )
 
     # ----------------------------------------------------------------------
@@ -99,7 +99,7 @@ def main(args):
 
     # lambda_grid_l1 = np.logspace(start=-4, stop=-4, num=1)
     # lambda_grid_l2 = np.logspace(start=-4, stop=-4, num=1)
-    n_atoms_grid = np.array([10, 30, 50, 70, 90, 100, 150])
+    n_atoms_grid = np.array([1, 10, 50, 100])
     # log_grid_small = np.logspace(start=-3, stop=-1, num=4)
     # log_grid_step_size = np.logspace(start=-3, stop=-1, num=3)
     eps = 8/255
@@ -142,7 +142,7 @@ def main(args):
 
         'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, 'trials', num_trials_grid,
                               data_train=train_dataset, norm=norm, attack='supervised',
-                              eps=eps, steps=200, targeted=False, step_size=1, batch_size=128, model_name=model_name),
+                              eps=eps, steps=300, targeted=False, step_size=1, batch_size=100, model_name=model_name),
         # --------------------------------------- Other attacks --------------------------------------------- #
         # 'DeepFool': perf.get_atks(model.to(device), torchattacks.DeepFool, steps=100),
         # 'CW': perf.get_atks(model.to(device), torchattacks.CW, 'c', log_grid_small, steps=100),
