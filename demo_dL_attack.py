@@ -30,7 +30,7 @@ def model_accuracy(dataset, model, device='cpu'):
     metric.to(device)
     model.eval()
     with torch.no_grad():
-        test_loader = torch.utils.data.DataLoader(dataset, batch_size=256)
+        test_loader = torch.utils.data.DataLoader(dataset, batch_size=128, )
         for x, y in test_loader:
             x, y = x.to(device), y.to(device)
             model = model.to(device)
@@ -99,11 +99,12 @@ def main(args):
 
     # lambda_grid_l1 = np.logspace(start=-4, stop=-4, num=1)
     # lambda_grid_l2 = np.logspace(start=-4, stop=-4, num=1)
-    n_atoms_grid = np.array([1])
+    n_atoms_grid = np.array([10, 30, 50, 70, 90, 100, 150])
     # log_grid_small = np.logspace(start=-3, stop=-1, num=4)
     # log_grid_step_size = np.logspace(start=-3, stop=-1, num=3)
     eps = 8/255
     norm = 'linf'
+    num_trials_grid = [1, 10, 50, 100, 1000]
 
     # eps = [0.5]
     # norm = 'l2'
@@ -137,15 +138,17 @@ def main(args):
     attacks_hyper = {
         # 'ADiLR': perf.get_atks(model.to(device), ADILR, 'lambda_l1', lambda_grid_l1, 'lambda_l2', lambda_grid_l2,
         #                       'n_atoms', n_atoms_grid, version='stochastic', data_train=train_dataset, device=device,
-        #                       batch_size=100, model_name=model_name, steps=150, attack_conditioned='atoms'),
-        'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, data_train=train_dataset, norm=norm,
-                              eps=eps, n_atoms=5, steps=200, trials=10, targeted=False, batch_size=128,
-                              model_name=model_name),
+        #                       batch_size=100, model_name=model_name, steps=150, attack_conditioned='atoms'),Text(0.5, 124.8322222222222, 'number of trials with computing time 30-38s, 122-132s, 524-552s, 1023-1072s, 5014-5222s, 10033-10420s')
+
+        'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, 'trials', num_trials_grid,
+                              data_train=train_dataset, norm=norm, attack='supervised',
+                              eps=eps, steps=200, targeted=False, step_size=1, batch_size=128, model_name=model_name),
         # --------------------------------------- Other attacks --------------------------------------------- #
         # 'DeepFool': perf.get_atks(model.to(device), torchattacks.DeepFool, steps=100),
         # 'CW': perf.get_atks(model.to(device), torchattacks.CW, 'c', log_grid_small, steps=100),
         # 'FGSM': perf.get_atks(model.to(device), torchattacks.FGSM, eps=eps),
         # 'FFGSM': perf.get_atks(model.to(device), torchattacks.FFGSM, alpha=12/255, eps=eps),
+        # 'PGD': perf.get_atks(model.to(device), PGD, eps=eps, alpha=2 / 225, steps=100, random_start=True),
         # --------------------------------- Attacks with l2-ball constraint --------------------------------- #
         # Optimal since eps = radius of ball ** 2
         # 'PGDL2': perf.get_atks(model.to(device), torchattacks.PGDL2, alpha=0.2, eps=eps, steps=100),
@@ -155,7 +158,7 @@ def main(args):
 
     print('Evaluation process')
     val_perf = perf.get_performance(attacks_hyper, model, val_loader, device=device)
-    param_selection_file = 'dict_model_ImageNet_version_constrained/model_comparaison.bin'
+    param_selection_file = 'dict_model_ImageNet_version_constrained/model_comparaison_sparse_random_unsupervised.bin'
     torch.save(val_perf, param_selection_file)
 
 

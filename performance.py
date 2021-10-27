@@ -151,11 +151,13 @@ def performance(attack, model, data, device=torch.device('cpu')):
     rmse = 0
     mse = 0
     device = attack.device
+    norm_max = []
     for x, y in data:
         # Assign to the device
         x, y = x.to(device=device), y.to(device=device)
         # start = time.time()
         adversary = attack(x, y)
+        norm_max.append(torch.max(torch.abs(adversary-x)))
         # print('single batch adversarial image processing time: {}'.format(time.time()-start))
         fooling += compute_fooling_rate(model=model.eval(), adversary=adversary, clean=x)
         rmse += compute_rmse(adversary=adversary, clean=x)
@@ -165,6 +167,7 @@ def performance(attack, model, data, device=torch.device('cpu')):
         "rmse": rmse / num_samples,
         "mse": mse / num_samples
     }
+    print(max(norm_max))
     return perf
 
 

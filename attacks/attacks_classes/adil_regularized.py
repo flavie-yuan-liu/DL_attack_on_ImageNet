@@ -435,9 +435,9 @@ def sadil_updated(dataset, model, targeted=True, nepochs=1e3, batchsize=1, lambd
 
             # Gradient computation
             loss_smooth.backward()
-            grad_D = grad_D + D.grad.data
 
         stepsize_v = max(stepsize_v*(delta**i_max), 1e-5)
+        grad_D = D.grad.data
 
         if torch.max(torch.abs(grad_D)).item() < 1e-4:
             continue
