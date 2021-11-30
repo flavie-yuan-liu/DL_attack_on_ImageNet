@@ -10,7 +10,8 @@ from DS_ImageNet import DS_ImageNet
 from imagenet_loading import load_ImageNet, dataset_split_by_class
 import torchattacks
 import random
-import torchmetrics
+import model_accuracy
+
 
 
 class Normalize(torch.nn.Module):
@@ -25,28 +26,16 @@ class Normalize(torch.nn.Module):
         return (input-mean)/std
 
 
-def model_accuracy(dataset, model, device='cpu'):
-    metric = torchmetrics.Accuracy()
-    metric.to(device)
-    model.eval()
-    with torch.no_grad():
-        test_loader = torch.utils.data.DataLoader(dataset, batch_size=128, )
-        for x, y in test_loader:
-            x, y = x.to(device), y.to(device)
-            model = model.to(device)
-            pred = model(x)
-            acc = metric(pred, y)
-        acc = metric.compute()
-    metric.reset()
-    return acc
-
-
 def main(args):
 
     if not torch.cuda.is_available():
         print('Check cuda setting for model training on ImageNet')
         return
-    device = 'cuda'
+
+    if not args.distributed:
+        torch.cuda.set_device(0)
+        device = torch.device(0)
+    torch.backends.cudnn.benchmark = True
 
     # ------------------------------------------------------------------------
     # loading model (densenet, googlenet, inception, mobilenetv2, resnet, vgg)
@@ -69,19 +58,23 @@ def main(args):
     norm_layer = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     model = torch.nn.Sequential(
         norm_layer,
-        model.eval()
+        model
     )
+    model.eval()
 
     # ----------------------------------------------------------------------
     # loading imagenet data
     # ----------------------------------------------------------------------
 
     dataset, classes = load_ImageNet()
-    # acc = model_accuracy(dataset, model, device=device)
+    # if args.distributed:
+    #     acc = model_accuracy.run_accuracy_computing(args, dataset, model)
+    # else:
+    #     acc = model_accuracy(args, dataset, model, device=device)
     # print("accuracy of the the model {} is {}".format(model_name, acc*100))
 
     # Set the number of samples for training
-    num_train_per_class = 1  # set the number of samples for training 10 x number of classes
+    num_train_per_class = 2  # set the number of samples for training 10 x number of classes
     num_val_per_class = 2
     num_test_per_class = 5
 
@@ -90,8 +83,9 @@ def main(args):
 
     train_dataset, val_dataset, test_dataset \
         = dataset_split_by_class(dataset, [num_train_per_class, num_val_per_class, num_test_per_class],
-                                 number_of_classes=1000)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=10, shuffle=False)
+                                 number_of_classes=args.trained_classes)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=100, shuffle=False)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=20, shuffle=False) #, pin_memory=True, num_workers=1)
 
     # ----------------------------------------------------------------------
     # hyper-parameter selecting
@@ -100,11 +94,12 @@ def main(args):
     # lambda_grid_l1 = np.logspace(start=-4, stop=-4, num=1)
     # lambda_grid_l2 = np.logspace(start=-4, stop=-4, num=1)
     n_atoms_grid = np.array([1, 10, 50, 100])
-    # log_grid_small = np.logspace(start=-3, stop=-1, num=4)
+    log_grid_small = np.logspace(start=-1, stop=4, num=5)
     # log_grid_step_size = np.logspace(start=-3, stop=-1, num=3)
     eps = 8/255
     norm = 'linf'
-    num_trials_grid = [1, 10, 50, 100, 1000]
+    num_trials_grid = [10]
+    steps_in_grid = 100
 
     # eps = [0.5]
     # norm = 'l2'
@@ -140,26 +135,33 @@ def main(args):
         #                       'n_atoms', n_atoms_grid, version='stochastic', data_train=train_dataset, device=device,
         #                       batch_size=100, model_name=model_name, steps=150, attack_conditioned='atoms'),Text(0.5, 124.8322222222222, 'number of trials with computing time 30-38s, 122-132s, 524-552s, 1023-1072s, 5014-5222s, 10033-10420s')
 
-        'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, 'trials', num_trials_grid,
-                              data_train=train_dataset, norm=norm, attack='supervised',
-                              eps=eps, steps=300, targeted=False, step_size=1, batch_size=100, model_name=model_name),
+        # 'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, 'trials', num_trials_grid, steps_in=100,
+        #                       data_train=train_dataset, data_val=val_dataset, norm=norm, attack='unsupervised',
+        #                       eps=eps, steps=1000, targeted=False, step_size=1, batch_size=50, model_name=model_name),
         # --------------------------------------- Other attacks --------------------------------------------- #
         # 'DeepFool': perf.get_atks(model.to(device), torchattacks.DeepFool, steps=100),
-        # 'CW': perf.get_atks(model.to(device), torchattacks.CW, 'c', log_grid_small, steps=100),
+        # 'CW': perf.get_atks(model.to(device), torchattacks.CW, 'c', log_grid_small, steps=100, lr=0.001),
         # 'FGSM': perf.get_atks(model.to(device), torchattacks.FGSM, eps=eps),
-        # 'FFGSM': perf.get_atks(model.to(device), torchattacks.FFGSM, alpha=12/255, eps=eps),
-        # 'PGD': perf.get_atks(model.to(device), PGD, eps=eps, alpha=2 / 225, steps=100, random_start=True),
+        # 'FFGSM': perf.get_atks(model.to(device), torchattacks.FFGSM, alpha=10/255, eps=eps),
+        # 'MIFGSM': perf.get_atks(model.to(device), torchattacks.MIFGSM, alpha=2/255, eps=eps, steps=100, decay=0.1),
+        # 'PGD': perf.get_atks(model.to(device), torchattacks.PGD, eps=eps, alpha=2 / 255, steps=100, random_start=True),
         # --------------------------------- Attacks with l2-ball constraint --------------------------------- #
         # Optimal since eps = radius of ball ** 2
         # 'PGDL2': perf.get_atks(model.to(device), torchattacks.PGDL2, alpha=0.2, eps=eps, steps=100),
-        # 'APGD-L2-ce': perf.get_atks(model.to(device), torchattacks.APGD, loss='ce', norm='L2', eps=eps),
-        # 'AutoAttack-L2': perf.get_atks(model.to(device), torchattacks.AutoAttack, norm='L2', eps=eps),
+        'APGD': perf.get_atks(model.to(device), torchattacks.APGD, loss='ce', norm='Linf', eps=eps, steps=100),
+        'AutoAttack': perf.get_atks(model.to(device), torchattacks.AutoAttack, norm='Linf', eps=eps, n_classes=1000),
+
     }
 
-    print('Evaluation process')
-    val_perf = perf.get_performance(attacks_hyper, model, val_loader, device=device)
-    param_selection_file = 'dict_model_ImageNet_version_constrained/model_comparaison_sparse_random_unsupervised.bin'
-    torch.save(val_perf, param_selection_file)
+    # print('Evaluation process')
+    # val_perf = perf.get_performance(attacks_hyper, model, val_loader, device=device)
+    # param_selection_file = 'dict_model_ImageNet_version_constrained/model_adil_resultat_for_param_selecting.bin'
+    # torch.save(val_perf, param_selection_file)
+
+    print('Test process')
+    test_perf = perf.get_performance(attacks_hyper, model, test_loader, device=device)
+    param_selection_file = 'dict_model_ImageNet_version_constrained/model_baseline_resultat_test.bin'
+    torch.save(test_perf, param_selection_file)
 
 
 if __name__ == '__main__':
@@ -173,14 +175,31 @@ if __name__ == '__main__':
         '--seed', '-s',
         metavar='S',
         type=int,
-        default=1,
+        default=3,
         help='change seed to carry out the exp'
     )
+    argparser.add_argument(
+        '--trained-classes',
+        metavar='TC',
+        type=int,
+        default=1000,
+        help='number of class for training'
+    )
+    argparser.add_argument(
+        '--distributed',
+        metavar='D',
+        type=bool,
+        default=False,
+        help='If distributed data parallel used, default value is False'
+    )
+
     args = argparser.parse_args()
 
     seed = args.seed  # Do from 1 to 5
     torch.random.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
-
     main(args)
+
+
+

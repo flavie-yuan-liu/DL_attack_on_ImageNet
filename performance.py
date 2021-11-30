@@ -146,28 +146,32 @@ def get_performance(atks, model, data, verbose=False, device=torch.device('cpu')
 
 
 def performance(attack, model, data, device=torch.device('cpu')):
-    num_samples = data.dataset.__len__()
+    num_samples = 0
     fooling = 0
     rmse = 0
     mse = 0
     device = attack.device
-    norm_max = []
     for x, y in data:
         # Assign to the device
         x, y = x.to(device=device), y.to(device=device)
+        pre = model(x).argmax(dim=-1)
+        ind = (pre==y)
+        x, y = x[ind], y[ind]
+        num_samples += torch.sum(ind)
+        # print(torch.sum(ind), torch.sum(ind)==0)
         # start = time.time()
         adversary = attack(x, y)
-        norm_max.append(torch.max(torch.abs(adversary-x)))
         # print('single batch adversarial image processing time: {}'.format(time.time()-start))
         fooling += compute_fooling_rate(model=model.eval(), adversary=adversary, clean=x)
         rmse += compute_rmse(adversary=adversary, clean=x)
         mse += compute_mse(adversary=adversary, clean=x)
+        # norm_max += sum(dv_norm_inf)
+    print(num_samples)
     perf = {
         "fooling_rate": fooling / num_samples,
         "rmse": rmse / num_samples,
         "mse": mse / num_samples
     }
-    print(max(norm_max))
     return perf
 
 

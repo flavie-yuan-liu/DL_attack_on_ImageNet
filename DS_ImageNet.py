@@ -10,25 +10,12 @@ TRAIN_PATH = os.path.join(ROOT_PATH, 'Data/train')
 VALID_PATH = os.path.join(ROOT_PATH, 'Data/val')
 LABLE_PATH = os.path.join(ROOT_PATH, 'LOC_synset_mapping.txt')
 
-normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
 
 transform = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
-    normalize
 ])
-
-normalize_inv = transforms.Normalize(
-        mean=[-0.485 / 0.229, -0.456 / 0.224, -0.406 / 0.225],
-        std=[1 / 0.229, 1 / 0.224, 1 / 0.225]
-    )
-
-normalize_inv_D = transforms.Normalize(
-        mean=[0, 0, 0],
-        std=[1 / 0.229, 1 / 0.224, 1 / 0.225]
-    )
 
 
 def read_label(path):
@@ -64,7 +51,7 @@ class DS_ImageNet(ImageFolder):
 def main(args):
     root = args.root
     valid_data = DS_ImageNet(root, split=args.split, transform=transform)
-    torch.save(valid_data, os.path.join(root, args.file_samples_dataset))
+    # torch.save(valid_data, os.path.join(root, args.file_samples_dataset))
 
 
 if __name__ == '__main__':
@@ -84,7 +71,7 @@ if __name__ == '__main__':
     argparser.add_argument(
         '--file-samples-dataset',
         metavar='P',
-        default='ImageNet1000.bin'
+        default='ImageNet1000_unnormalized.bin'
     )
     args = argparser.parse_args()
 

@@ -5,6 +5,19 @@ from torch.utils.data import Subset
 import numpy as np
 
 
+class Subset_I(Subset):
+    def __init__(self, dataset, indices, indexed=False):
+        super(Subset_I, self).__init__(dataset=dataset, indices=indices)
+        self.indexed = indexed
+
+    def __getitem__(self, item):
+        x, y = super().__getitem__(item)
+        if self.indexed:
+            return item, x, y
+        else:
+            return x, y
+
+
 def dataset_split_by_class(dataset, number_per_class, number_of_classes=1000):
 
     # number_of_class is list containing two elements,
@@ -26,9 +39,9 @@ def dataset_split_by_class(dataset, number_per_class, number_of_classes=1000):
 
     indices_train = matrix_sorted_idx[:number_of_classes, 0:number_per_class[0]].flatten()
     indices_val = matrix_sorted_idx[:number_of_classes, number_per_class[0]:split1].flatten()
-    indices_test = matrix_sorted_idx[number_of_classes:, split1:split2].flatten()
+    indices_test = matrix_sorted_idx[:number_of_classes, split1:split2].flatten()
 
-    return Subset(dataset, indices_train), Subset(dataset, indices_val), Subset(dataset, indices_test)
+    return Subset_I(dataset, indices_train), Subset_I(dataset, indices_val), Subset_I(dataset, indices_test)
 
 
 def load_ImageNet():
