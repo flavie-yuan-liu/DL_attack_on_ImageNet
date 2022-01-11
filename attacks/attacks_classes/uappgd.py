@@ -35,7 +35,7 @@ class UAPPGD(Attack):
      """
 
     def __init__(self, model, data_train=None, data_val=None, steps=10, batch_size=100, beta=9, step_size=0.01, norm='l2', eps=.1,
-                 optimizer='adam', distributed=None):
+                 optimizer='adam', distributed=None, model_name=None):
         super().__init__("UAPPGD", model)
         self.beta = beta
         self.steps = steps
@@ -45,10 +45,10 @@ class UAPPGD(Attack):
         self.eps = eps
         self.optimizer = optimizer
 
-        root = 'dict_model_ImageNet_version_constrained/'
+        root = 'dict_model_ImageNet_version_constrained/{}_uappgd/trained_dicts'.format(model_name)
         self.model_name = os.path.join(root, 'UAPPGD_model')
 
-        if data_train is not None:
+        if not os.path.exists(self.model_name):
             if distributed:
                 IP = os.environ['SLURM_STEP_NODELIST']
                 world_size = int(os.environ['SLURM_NTASKS'])
@@ -87,7 +87,7 @@ class UAPPGD(Attack):
         v = torch.ones((self.batch_size, 1), device=self.device)
 
         for _ in trange(int(self.steps)):
-            for x, y in tqdm(data_loader):
+            for x, y in data_loader:
                 x, y = x.to(self.device), y.to(self.device)
                 optimizer.zero_grad()
                 x_attack = torch.tensordot(v, attack, dims=([1], [0]))
@@ -163,7 +163,7 @@ class UAPPGD(Attack):
         images = images.clone().detach().to(self.device)
 
         # Check if the UAP attack has been learned
-        if ~os.path.exists(self.model_name):
+        if not os.path.exists(self.model_name):
             print('The UAP attack has not been learned. It is now being learned on the given dataset.')
             dataset = QuickAttackDataset(images=images, labels=labels)
             self.learn_attack(dataset=dataset, model=self.model)

@@ -184,3 +184,17 @@ class QuickAttackDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, item):
         return self.images[item], self.labels[item]
+
+
+def compute_fooling_rate(dataset, attack, model, device):
+    with torch.no_grad():
+        n_img = len(dataset)
+        data_loader = torch.utils.data.DataLoader(dataset, batch_size=128, shuffle=False)
+        fooling_sample = 0
+        for x, _ in data_loader:
+            x = x.to(device=device)
+            y_pred = model(x).argmax(dim=1)
+            y_attk = model(x + attack).argmax(dim=1)
+            fooling_sample += torch.sum(y_pred != y_attk)
+
+        return fooling_sample/n_img

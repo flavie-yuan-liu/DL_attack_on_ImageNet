@@ -59,8 +59,9 @@ class ADIL(Attack):
     """
 
     def __init__(self, model, eps=None, steps=1e2, norm='L2', targeted=True, n_atoms=10, batch_size=None,
-                 data_train=None, data_val=None, step_size=None, trials=10, attack='unsupervised', model_name=None,
-                 estimate_step_size=False, is_distributed=False, steps_in=None):
+                 data_train=None, trials=10, attack='supervised', model_name=None, step_size=0.01,
+                 is_distributed=False, steps_in=None, loss='ce', method='gd'):
+
         super().__init__("ADIL", model.eval())
         # Attack parameters
         self.norm = norm.lower()
@@ -71,18 +72,20 @@ class ADIL(Attack):
         self.attack = attack
         self.trials = trials
         self.alpha = eps
+        self.step_size = step_size
 
         # Algorithmic parameters
         self.steps = steps
-        self.estimate_step_size = estimate_step_size
-        self.step_size = n_atoms if step_size is None else step_size
+        self.steps_inner = steps_in
         self.batch_size = batch_size
-        self.loss = None
-        self.iteration_v = steps_in
+        self.loss = loss
+        self.model_name = model_name
+        self.method = method
 
+        # path = f"trained_dicts /"
         path = f"dict_model_ImageNet_version_constrained/"
         model_file = f"ImageNet_{model_name}_num_atom_{self.n_atoms}_nepoch_{self.steps}_v_step_{steps_in}_d_step_{steps_in}" \
-                     f"_sep_{len(data_train)}_all_batch.bin"
+                     f"_sep_{len(data_train)}_{loss}_method_{method}.bin"
         self.model_file = os.path.join(path, model_file)
 
         # Learn dictionary
@@ -90,261 +93,107 @@ class ADIL(Attack):
             if is_distributed:
                 IP = os.environ['SLURM_STEP_NODELIST']
                 world_size = int(os.environ['SLURM_NTASKS'])
-                mp.spawn(self.learn_dictionary_distributed, args=(IP, world_size, data_train, data_val),
-                         nprocs=world_size, join=True)
+                mp.spawn(self.learn_dictionary_distributed, args=(IP, world_size, data_train), nprocs=world_size,
+                         join=True)
             else:
-                self.learn_dictionary_b(dataset=data_train)
+                if method == 'gd':
+                    self.learn_dictionary_a(dataset=data_train, warm_start=True)
+                elif method == 'alter':
+                    self.learn_dictionary_b(dataset=data_train, warm_start=True)
 
-    def projection_v(self, var):
-        if self.norm == 'l2':
-            """ In order to respect l2 bound, v has to lie inside a l2-ball """
-            v_norm = torch.norm(var, p='fro', dim=1, keepdim=True)
-            return self.eps * torch.div(var, torch.maximum(v_norm, self.eps * torch.ones_like(v_norm)))
+    def f_loss(self, outputs, labels):
+        one_hot_labels = torch.eye(len(outputs[0]))[labels].to(self.device)
 
-        elif self.norm == 'linf':
-            """ In order to respect linf bound, v has to lie inside a l1-ball """
-            return project_onto_l1_ball(var, eps=self.alpha)
+        i, _ = torch.max((1-one_hot_labels)*outputs, dim=1) # get the second largest logit
+        j = torch.masked_select(outputs, one_hot_labels.bool()) # get the largest logit
 
-    def projection_d(self, var):
-        if self.norm == 'l2':
-            """ In order to respect l2 bound, D has to lie inside a l2 unit ball """
-            return constraint_dict(var, constr_set='l2ball')
+        if self._targeted:
+            return torch.clamp((i-j), min=0)
+        else:
+            return torch.clamp((j-i), min=0)
 
-        elif self.norm == 'linf':
-            """ In order to respect l2 bound, D has to lie inside a linf unit ball """
-            return torch.clamp(var, min=-1, max=1)
-
-    def sample_sphere(self, n_samples):
-        if self.norm == 'l2':
-            """ In order to respect l2 bound, sample v on a l2-sphere """
-            var = (2 * torch.rand(n_samples, self.n_atoms) - 1)
-            # var = torch.randn(n_samples, self.n_atoms)
-            v_norm = torch.norm(var, p='fro', dim=1, keepdim=True)
-            return self.eps * torch.div(var, v_norm)
-        elif self.norm == 'linf':
-            """ Sample 'sparse' v on the l1-sphere """
-            m = torch.distributions.uniform.Uniform(torch.tensor([self.alpha]), torch.tensor([2*self.alpha]))
-            # p = torch.distributions.uniform.Uniform(torch.tensor([-1.0]), torch.tensor([1.0]))
-            var_raw = m.sample(sample_shape=[n_samples, self.n_atoms])[:, :, 0]
-            # var_sgn = p.sample(sample_shape=[n_samples, self.n_atoms])[:, :, 0]
-            # var_sgn = np.random.choice([-1, 1], n_samples*self.n_atoms).reshape(n_samples, self.n_atoms)
-            # var_sgn = torch.from_numpy(var_sgn)
-            # var = torch.mul(var_sgn, var_raw)
-            return self.projection_v(var_raw)
-
-    def get_target(self, data_loader):
-        """ Output the target or label to fool depending on self.targeted """
-        target = []
-        for index, (x, y) in enumerate(data_loader):
-            target.append(get_target(x.to(device=self.device), y.to(device=self.device), self.targeted, self.model))
-        return target
-
-    def learn_dictionary_a(self, dataset):
+    def learn_dictionary_a(self, dataset, warm_start):
         """ Learn the adversarial dictionary """
-        dataset.indexed=False
+        dataset.indexed = False
         # Shape parameters
         n_img = len(dataset)
         x, _ = next(iter(dataset))
         nc, nx, ny = x.shape
 
-        # Line-search parameters
-        delta = .5
-        gamma = 1
-        beta = .5
-
         # Other parameters
         batch_size = n_img if self.batch_size is None else self.batch_size
         coeff = 1. if self.targeted else -1.
-        # indices = get_slices(n_img, batch_size)  # Slices of samples according to the batch-size
 
         # Data loader
         dataset.indexed = True
-        data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=4)
-        # target = self.get_target(data_loader=data_loader)
+        data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True,
+                                                  num_workers=0)
 
         # Function
         criterion = nn.CrossEntropyLoss(reduction='mean')
-        step_size_v = self.step_size*0.05
-        step_size_d = self.step_size*10
-        index_i_d = []
-        index_i_v = []
 
         # Initialization of the dictionary D and coding vectors v
-        if self.norm.lower() == 'l2':
-            d = self.projection_d(torch.randn(nc, nx, ny, self.n_atoms, device=self.device))
+        if warm_start:
+            path = f"dict_model_ImageNet_version_constrained/"
+            warm_start_file = f"ImageNet_{self.model_name}_num_atom_{self.n_atoms}_nepoch_{self.steps}_AdamW" \
+                         f"_{200}.bin"
+            d, _, _, _ = torch.load(os.path.join(path, warm_start_file))
         else:
-            d = (-1 + 2*torch.rand(nc, nx, ny, self.n_atoms, device=self.device))
+            if self.norm.lower() == 'l2':
+                d = self.projection_d(torch.randn(nc, nx, ny, self.n_atoms, device=self.device))
+            else:
+                d = (-1 + 2*torch.rand(nc, nx, ny, self.n_atoms, device=self.device))
 
         v = self.projection_v(torch.rand(n_img, self.n_atoms, device=self.device))
 
         # initialized model
         adil_model = Attack_dict_model(d, v, self.eps).to(self.device)
         # optimise = torch.optim.AdamW([
-        #     {'params': adil_model.d, 'lr':0.5},
+        #     {'params': adil_model.d, 'lr': 0.02},
         #     {'params': adil_model.v}
-        # ], lr=1e-2)
-        optimise = torch.optim.AdamW(adil_model.parameters(), lr=1e-2)
+        # ], lr=5e-3)
+        optimise = torch.optim.AdamW(adil_model.parameters(), lr=self.step_size)
 
         # Initialization of intermediate variables
         loss_all = []
-
         fooling_rate_all = []
-        lam =100
         # Algorithm
+        adil_model.train()
         bar = trange(int(self.steps))
         for iteration in bar:
             # Gradients and loss computations
             loss_full = 0
             fooling_sample = 0
-            # optimise.zero_grad()
-            adil_model.zero_grad()
             for index, x, label in data_loader:
                 # Load data
                 x, label = x.to(device=self.device), label.to(device=self.device)
-                # ind = (self.model(x).argmax(-1) == label).detach().cpu().numpy()
-                # index, x, label = index[ind], x[ind], label[ind]
 
                 # compute loss with model
-                # adil_model.v.requires_grad = False
-                output= adil_model(x, index, self.model)
-                fooling_sample += torch.sum(output.argmax(-1) != label)
-                loss = coeff*criterion(output, label)
+                optimise.zero_grad()
+                output = adil_model(x, index, self.model)
+                fooling_sample += torch.sum(output.argmax(dim=-1) != label)
+                if self.loss == 'ce':
+                    loss = coeff*criterion(output, label)
+                elif self.loss == 'logits':
+                    loss = self.f_loss(output, label).sum()
                 loss.backward()
+                optimise.step()
+                adil_model.update_v()
+                adil_model.update_d()
 
                 with torch.no_grad():
                     loss_full += loss
 
-            optimise.step()
-            adil_model.update_v()
-            adil_model.update_d()
-
-            # # update d by Forward-Backward step with line-search
-            # with torch.no_grad():
-            #     # Memory
-            #     d_old = adil_model.d.data.detach().clone()
-            #     v_old = adil_model.v.data.detach().clone()
-            #
-            #     loss_old_d = loss_full.item()
-            #     grad_d = adil_model.d.grad.data
-            #     grad_v = adil_model.v.grad.data
-            #
-            #     d = adil_model.d.data
-            #
-            #     d = self.projection_d(d - step_size_d * grad_d)
-            #     d_d = d - d_old
-            #     h = torch.sum((d - d_old) * grad_d) + .5 * (gamma / step_size_d) * torch.norm(d - d_old, 'fro') ** 2
-            #
-            #     flag = False
-            #     index_i = 0
-            #     while not flag:
-            #         d_new = d_old + (delta ** index_i) * d_d
-            #         adil_model.d.data = d_new
-            #         loss_new = 0
-            #         for index, x, label in data_loader:
-            #             x, label = x.to(device=self.device), label.to(device=self.device)
-            #             output = adil_model(x, index, self.model)
-            #             loss_new += (coeff * criterion(output, label)).item()
-            #
-            #         if index_i == 0:
-            #             loss_cur = loss_new
-            #             d_cur = d_new
-            #
-            #         # Check the sufficient decrease condition
-            #         if loss_new <= loss_old_d + beta * (delta ** index_i) * h.item():
-            #             # Then its fine !
-            #             if loss_new >= loss_cur:
-            #                 adil_model.d.data = d_cur
-            #                 loss_new = loss_cur
-            #                 index_i = 0
-            #
-            #             flag = True
-            #         else:
-            #             # Then we need to change index_i
-            #             index_i = index_i + 1
-            #             if index_i > 50:
-            #                 # We have reached a stationary point
-            #                 break
-            #
-            #     index_i_d.append(index_i)
-            #     if len(index_i_d) > 5:
-            #         if min(index_i_d[-5:]) > 0:
-            #             step_size_d = delta ** min(index_i_d[-5:]) * step_size_d
-            #         elif max(index_i_d[-5:])==0:
-            #             step_size_d = 1/delta * step_size_d
-            #
-            #     # print('index = {} and d_update loss = {} '.format(index_i, loss_new))
-            #
-            #     # update v by linesearching
-            #     # Memory
-            #     loss_old_v = loss_new
-            #     v = adil_model.v.data
-            #
-            #     # Update
-            #     v = self.projection_v(v - step_size_v * grad_v)
-            #
-            #     # added distance
-            #     d_v = v - v_old
-            #     h = torch.sum((v - v_old) * grad_v) + .5 * (gamma / step_size_v) \
-            #         * torch.norm(v - v_old, 'fro') ** 2
-            #
-            #     # Line-search
-            #     flag = False
-            #     index_i = 0
-            #     while not flag:
-            #         v_new = v_old + (delta ** index_i) * d_v
-            #         adil_model.v.data = v_new
-            #         change_label = 0
-            #         fooling_label = 0
-            #         loss_new = 0
-            #         for index, x, label in data_loader:
-            #             x, label = x.to(device=self.device), label.to(device=self.device)
-            #             output = adil_model(x, index, self.model)
-            #             loss_new += (coeff * criterion(output, label)).item()
-            #             fooling_label += torch.sum(adil_model(x, index, self.model).argmax(-1) != self.model(x).argmax(-1)).item()
-            #             change_label += torch.sum(adil_model(x, index, self.model).argmax(-1) != label).item()
-            #
-            #         if index_i == 0:
-            #             loss_cur = loss_new
-            #             v_cur = v_new
-            #
-            #         # Check the sufficient decrease condition
-            #         if loss_new <= loss_old_v + beta * (delta ** index_i) * h.item():
-            #             # Then its fine !
-            #             if loss_new >= loss_cur:
-            #                 # if found point owning loss bigger than the originally updated one,
-            #                 # then keep the latter
-            #                 adil_model.v.data = v_cur
-            #                 loss_new = loss_cur
-            #                 index_i = 0
-            #             else:
-            #                 adil_model.v.data = v_new
-            #             flag = True
-            #         else:
-            #             # Then we need to change index_i
-            #             index_i = index_i + 1
-            #             if index_i > 5:
-            #                 adil_model.v.data = v_old
-            #                 # We have reached a stationary point
-            #                 flag = True
-            #
-            #     index_i_v.append(index_i)
-            #     if len(index_i_v) > 5 and min(index_i_v[-5:]) > 0:
-            #         step_size_v = max(delta ** min(index_i_v[-5:]) * step_size_v, 1e-6)
-            #     fooling_rate_all.append(change_label/n_img)
-            #     # print('index_v = {} and d_update loss = {} and fooling_rate = {} and change_label={}'
-            #     #       .format(index_i, loss_new, fooling_label/n_img, change_label/n_img))
-            #     # print('step_size_v = {} and step_size_d = {}'.format(step_size_v, step_size_d))
-
-            # # Keep track of loss
             loss_all.append(loss_full.item())
-            fooling_rate_all.append(fooling_sample/n_img)
-            # print(loss_all[-1], fooling_sample/n_img)
+            fooling_rate_all.append(fooling_sample.item()/n_img)
+            print(loss_all[-1], fooling_sample/n_img)
+
             if iteration > 1 and abs(loss_all[iteration] - loss_all[iteration - 1]) < 1e-6:
                 break
 
         torch.save([adil_model.d.data, adil_model.v.data, loss_all, fooling_rate_all], self.model_file)
 
-    def learn_dictionary_b(self, dataset):
+    def learn_dictionary_b(self, dataset, warm_start):
         """ Learn the adversarial dictionary """
         dataset.indexed=False
         # Shape parameters
@@ -364,17 +213,23 @@ class ADIL(Attack):
         criterion = nn.CrossEntropyLoss(reduction='mean')
 
         # Initialization of the dictionary D and coding vectors v
-        if self.norm.lower() == 'l2':
-            d = self.projection_d(torch.randn(nc, nx, ny, self.n_atoms, device=self.device))
+        if warm_start:
+            path = f"dict_model_ImageNet_version_constrained/"
+            warm_start_file = f"ImageNet_{self.model_name}_num_atom_{self.n_atoms}_nepoch_{self.steps}_AdamW" \
+                              f"_{200}.bin"
+            d, _, _, _ = torch.load(os.path.join(path, warm_start_file))
         else:
-            d = (-1 + 2*torch.rand(nc, nx, ny, self.n_atoms, device=self.device))
+            if self.norm.lower() == 'l2':
+                d = self.projection_d(torch.randn(nc, nx, ny, self.n_atoms, device=self.device))
+            else:
+                d = (-1 + 2 * torch.rand(nc, nx, ny, self.n_atoms, device=self.device))
 
         v = self.projection_v(torch.zeros(n_img, self.n_atoms, device=self.device))
 
         # initialized model
         adil_model = Attack_dict_model(d, v, self.eps).to(self.device)
-        optimise_d = torch.optim.AdamW([adil_model.d], lr=0.05)
-        optimise_v = torch.optim.AdamW([adil_model.v], lr=5e-2)
+        optimise_d = torch.optim.AdamW([adil_model.d], lr=2*self.step_size)
+        optimise_v = torch.optim.AdamW([adil_model.v], lr=self.step_size)
 
         # Initialization of intermediate variables
         loss_all = []
@@ -382,32 +237,30 @@ class ADIL(Attack):
 
         # Algorithm
         # bar = trange(int(self.steps))
-        bar = trange(int(self.steps//(self.iteration_v+self.iteration_v)))
+        bar = trange(int(self.steps//self.steps_inner))
         for iteration in bar:
             # Gradients and loss computations
-            loss_full = 0
-            for _ in range(self.iteration_v):
-                fooling_sample = 0
+            # v_step
+            for _ in range(self.steps_inner):
                 for index, x, label in data_loader:
                     # Load data
                     x, label = x.to(device=self.device), label.to(device=self.device)
                     adil_model.d.requires_grad = False
                     adil_model.v.requires_grad = True
                     output = adil_model(x, index, self.model)
-                    # fooling_sample += torch.sum(output.argmax(-1) != label)
                     optimise_v.zero_grad()
-                    loss = coeff*criterion(output, label)
+                    if self.loss == 'ce':
+                        loss = coeff * criterion(output, label)
+                    elif self.loss == 'logits':
+                        loss = self.f_loss(output, label).sum()
                     loss.backward()
 
                     optimise_v.step()
                     adil_model.update_v()
 
-                with torch.no_grad():
-                    loss_full += loss
-
-                    # print('v_step loss', loss_full)
-
-            for _ in range(self.iteration_v):
+            # d_step
+            for _ in range(self.steps_inner):
+                loss_full = 0
                 fooling_sample = 0
                 for index, x, label in data_loader:
                     # Load data
@@ -417,7 +270,10 @@ class ADIL(Attack):
                     output = adil_model(x, index, self.model)
                     fooling_sample += torch.sum(output.argmax(-1) != label)
                     optimise_d.zero_grad()
-                    loss = coeff * criterion(output, label)
+                    if self.loss == 'ce':
+                        loss = coeff * criterion(output, label)
+                    elif self.loss == 'logits':
+                        loss = self.f_loss(output, label).sum()
                     loss.backward()
 
                     optimise_d.step()
@@ -428,198 +284,13 @@ class ADIL(Attack):
 
                     # print('d_step loss', loss_full)
             loss_all.append(loss_full.item())
-            fooling_rate_all.append(fooling_sample / n_img)
+            fooling_rate_all.append(fooling_sample.item() / n_img)
 
-            # print(loss_all[-1], fooling_sample/n_img)
+            print(loss_all[-1], fooling_sample/n_img)
             if iteration > 1 and abs(loss_all[iteration] - loss_all[iteration - 1]) < 1e-6:
                 break
 
         torch.save([adil_model.d.data, adil_model.v.data, loss_all, fooling_rate_all], self.model_file)
-
-    def learn_dictionary(self, dataset, model):
-        """ Learn the adversarial dictionary """
-
-        # Shape parameters
-        n_img = len(dataset)
-        x, _ = next(iter(dataset))
-        nc, nx, ny = x.shape
-
-        # Line-search parameters
-        delta = .5
-        gamma = 1
-        beta = .5
-
-        # Other parameters
-        batch_size = n_img if self.batch_size is None else self.batch_size
-        coeff = 1. if self.targeted else -1.
-        indices = get_slices(n_img, batch_size)  # Slices of samples according to the batch-size
-
-        # Data loader
-        data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
-        target = self.get_target(data_loader=data_loader)
-
-        # Function
-        criterion = nn.CrossEntropyLoss(reduction='sum')
-        step_size_v = self.step_size*0.01
-        step_size_d = self.step_size*10
-        index_v = []
-        index_d = []
-        flag_v = False
-        flag_d = False
-
-        # Initialization of the dictionary D and coding vectors v
-        if self.norm.lower() == 'l2':
-            d = self.projection_d(torch.randn(nc, nx, ny, self.n_atoms, device=self.device))
-        else:
-            d = (-1 + 2*torch.rand(nc, nx, ny, self.n_atoms, device=self.device))
-
-        v = self.projection_v(torch.randn(n_img, self.n_atoms, device=self.device))
-
-        # Initialization of intermediate variables
-        d_old = torch.zeros_like(d)
-        v_old = torch.zeros_like(v)
-        loss_all = np.nan * np.ones(int(self.steps))
-        dv_lint = []
-        # Algorithm
-        bar = trange(int(self.steps))
-        flag_stop = False
-        for iteration in bar:
-            # Gradients and loss computations
-            loss_full = 0
-            for index, (x, _) in enumerate(data_loader):
-                # Prepare computation graph
-                v.detach()
-                v.requires_grad = True
-                d.detach()
-                d.requires_grad = True
-
-                # Load data
-                x = x.to(device=self.device)  # , y.to(device=self.device)
-                ind = indices[index]
-                dv = torch.tensordot(v[ind], d, dims=([1], [3]))
-                loss = coeff * criterion(model(x + dv), target[index])
-                loss.backward()
-
-                with torch.no_grad():
-                    loss_full += loss.item()
-
-            # Forward-Backward step with line-search
-            with torch.no_grad():
-
-                grad_v = v.grad
-                grad_d = d.grad
-
-                # Memory
-                d_old.copy_(d)
-                v_old.copy_(v)
-                # grad_v_old.copy_(grad_v)
-                # grad_d_old.copy_(grad_d)
-                loss_old_v = loss_full
-
-                # Update
-                v = self.projection_v(v - step_size_v * grad_v)
-                # print(torch.norm(v, p='fro', dim=1))
-
-                # added distance
-                d_v = v - v_old
-                # First order approximation of the difference in loss
-                # h = torch.sum((d - d_old) * grad_d) + torch.sum((v - v_old) * grad_v) \
-                #     + .5 * (gamma / self.step_size) * (torch.norm(d - d_old, 'fro') ** 2
-                #                                        + torch.norm(v - v_old, 'fro') ** 2)
-                h = torch.sum((v - v_old) * grad_v) + .5 * (gamma / step_size_v) * torch.norm(v - v_old, 'fro') ** 2
-
-                # Line-search
-                flag = False
-                index_i_v = 0
-                while not flag and not flag_v:
-                    v_new = v_old + (delta ** index_i_v) * d_v
-                    loss_new = 0
-                    for index, (x, _) in enumerate(data_loader):
-                        x = x.to(device=self.device)
-                        ind = indices[index]
-                        dv = torch.tensordot(v_new[ind], d, dims=([1], [3]))
-                        loss_new += (coeff * criterion(model(x + dv), target[index])).item()
-
-                    if index_i_v == 0:
-                        loss_cur = loss_new
-                        v_cur = v_new
-
-                    # Check the sufficient decrease condition
-                    if loss_new <= loss_old_v + beta * (delta ** index_i_v) * h.item():
-                        # Then its fine !
-                        if loss_new >= loss_cur:
-                            v = v_cur
-                            loss_new = loss_cur
-                            index_i_v = 0
-                        else:
-                            v = v_new
-                        flag = True
-                    else:
-                        # Then we need to change index_i
-                        index_i_v = index_i_v + 1
-                        if index_i_v > 10:
-                            # We have reached a stationary point
-                            flag = True
-                            flag_v = True
-
-                index_v.append(index_i_v)
-                if len(index_v) >=5 and min(index_v[-5:]) > 0:
-                    step_size_v = step_size_v * delta**min(index_v[-5:])
-                # print('index = {} and v_update loss = {}'.format(index_i_v, loss_new))
-
-                loss_old_d = loss_new
-                d = self.projection_d(d - step_size_d * grad_d)
-                d_d = d - d_old
-                h = torch.sum((d - d_old) * grad_d) + .5 * (gamma / step_size_d) * torch.norm(d - d_old, 'fro') ** 2
-
-                flag = False
-                index_i_d = 0
-                while not flag and not flag_d:
-                    dv_i_lint = 0
-
-                    d_new = d_old + (delta ** index_i_d) * d_d
-                    loss_new = 0
-                    for index, (x, _) in enumerate(data_loader):
-                        x = x.to(device=self.device)
-                        ind = indices[index]
-                        dv = torch.tensordot(v[ind], d_new, dims=([1], [3]))
-                        dv_i_lint = max(dv_i_lint, torch.max(torch.abs(dv)))
-                        loss_new += (coeff * criterion(model(x + dv), target[index])).item()
-
-                    if index_i_d == 0:
-                        loss_cur = loss_new
-                        d_cur = d_new
-                        dv_i_lint_cur = dv_i_lint
-
-                    # Check the sufficient decrease condition
-                    if loss_new <= loss_old_d + beta * (delta ** index_i_d) * h.item():
-                        # Then its fine !
-                        if loss_new >= loss_cur:
-                            d = d_cur
-                            loss_new = loss_cur
-                            index_i_d = 0
-                            dv_i_lint = dv_i_lint_cur
-                        else:
-                            d = d_new
-                        flag = True
-                    else:
-                        # Then we need to change index_i
-                        index_i_d = index_i_d + 1
-                        if index_i_d > 10:
-                            # We have reached a stationary point
-                            flag = True
-                            flag_d = True
-
-                index_d.append(index_i_d)
-                if len(index_d) >= 5 and min(index_d[-5:]) > 0:
-                    step_size_d = step_size_d * delta**min(index_d[-5:])
-                # print('index = {} and d_update loss = {} and lint of dv = {}'.format(index_i_d, loss_new, dv_i_lint))
-
-                if flag_v and flag_d:
-                    break
-                # Keep track of loss
-                loss_all[iteration] = loss_new
-        torch.save([d, v, loss_all], self.model_file)
 
     def learn_dictionary_distributed(self, rank, IP, world_size, dataset, validation):
         """ Learn the adversarial dictionary by distributed data parallel"""
@@ -643,11 +314,11 @@ class ADIL(Attack):
         # distributed process initialization
         #########################################
 
-        dist_init(host_addr=IP, rank=rank, world_size=world_size)
-        local_rank = int(os.environ['SLURM_LOCALID'])
-        torch.cuda.set_device(local_rank)
-        device = torch.device(local_rank)
-        torch.backends.cudnn.benchmark = True
+        dist_init(rank=rank, world_size=world_size)
+        # local_rank = int(os.environ['SLURM_LOCALID'])
+        torch.cuda.set_device(rank)
+        device = torch.device('cuda')
+        print(device)
 
         ##########################################
         # distributed data loader
@@ -674,8 +345,8 @@ class ADIL(Attack):
         # Create DDP model
         ###########################################
         criterion = nn.CrossEntropyLoss(reduction='mean')
-        dict_model = Attack_dict_model(d, v, self.eps).cuda(local_rank)
-        ddp_model = DDP(dict_model, device_ids=[local_rank])
+        dict_model = Attack_dict_model(d, v, self.eps).cuda(rank)
+        ddp_model = DDP(dict_model, device_ids=[rank])
 
         # Initialize Optimiser
         optimise = torch.optim.AdamW(ddp_model.parameters(), lr=0.01*dist.get_world_size())
@@ -689,7 +360,7 @@ class ADIL(Attack):
 
         # Algorithm
         bar = trange(int(self.steps))
-        for iteration in bar:
+        for _ in bar:
             # Gradients and loss computations
             loss_full = 0
             fooling_sample = 0
@@ -701,133 +372,27 @@ class ADIL(Attack):
                 # compute loss with model
                 output = ddp_model(x, index, self.model.to(device))
                 fooling_sample_s = torch.sum(output.argmax(-1) != label)
-                loss = coeff*criterion(output, label)
+                if self.loss == 'ce':
+                    loss = coeff*criterion(output, label)
+                elif self.loss == 'logits':
+                    loss = self.f_loss(output, label).sum()
 
                 loss.backward()
                 optimise.step()
 
                 dist.barrier()
-                ddp_model.module.update_v()
-                ddp_model.module.update_d()
-                dist.reduce(loss, op=dist.ReduceOp.Sum)
-                loss_full += loss
-                dist.reduce(fooling_sample_s, op=dist.ReduceOp.SUM)
-                fooling_sample += fooling_sample_s
-            fooling_rate_all.append(fooling_sample/n_img)
-            loss_all.append(loss_full)
+                with torch.no_grad():
+                    ddp_model.module.update_v()
+                    ddp_model.module.update_d()
+                    dist.reduce(loss, 0, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(fooling_sample_s, 0, op=dist.ReduceOp.SUM)
+                    loss_full += loss
+                    fooling_sample += fooling_sample_s
 
-            # # Forward-Backward step with line-search
-            # with torch.no_grad():
-            #
-            #     grad_v = v.grad
-            #     grad_d = d.grad
-            #
-            #     # Memory
-            #     d_old.copy_(d)
-            #     v_old.copy_(v)
-            #     loss_old_v = loss_full
-            #
-            #     # Update
-            #     v = self.projection_v(v - step_size_v * grad_v)
-            #
-            #     # added distance
-            #     d_v = v - v_old
-            #     # First order approximation of the difference in loss
-            #     # h = torch.sum((d - d_old) * grad_d) + torch.sum((v - v_old) * grad_v) \
-            #     #     + .5 * (gamma / self.step_size) * (torch.norm(d - d_old, 'fro') ** 2
-            #     #                                        + torch.norm(v - v_old, 'fro') ** 2)
-            #     h = torch.sum((v - v_old) * grad_v) + .5 * (gamma / step_size_v) * torch.norm(v - v_old, 'fro') ** 2
-            #
-            #     # Line-search
-            #     flag = False
-            #     index_i_v = 0
-            #     while not flag and not flag_v:
-            #         v_new = v_old + (delta ** index_i_v) * d_v
-            #         loss_new = 0
-            #         for index, (x, _) in enumerate(data_loader):
-            #             x = x.to(device=self.device)
-            #             ind = indices[index]
-            #             dv = torch.tensordot(v_new[ind], d, dims=([1], [3]))
-            #             loss_new += (coeff * criterion(model(x + dv), target[index])).item()
-            #
-            #         if index_i_v == 0:
-            #             loss_cur = loss_new
-            #             v_cur = v_new
-            #
-            #         # Check the sufficient decrease condition
-            #         if loss_new <= loss_old_v + beta * (delta ** index_i_v) * h.item():
-            #             # Then its fine !
-            #             if loss_new >= loss_cur:
-            #                 v = v_cur
-            #                 loss_new = loss_cur
-            #                 index_i_v = 0
-            #             else:
-            #                 v = v_new
-            #             flag = True
-            #         else:
-            #             # Then we need to change index_i
-            #             index_i_v = index_i_v + 1
-            #             if index_i_v > 10:
-            #                 # We have reached a stationary point
-            #                 flag = True
-            #                 flag_v = True
-            #
-            #     index_v.append(index_i_v)
-            #     if len(index_v) >=5 and min(index_v[-5:]) > 0:
-            #         step_size_v = step_size_v * delta**min(index_v[-5:])
-            #     # print('index = {} and v_update loss = {}'.format(index_i_v, loss_new))
-            #
-            #     loss_old_d = loss_new
-            #     d = self.projection_d(d - step_size_d * grad_d)
-            #     d_d = d - d_old
-            #     h = torch.sum((d - d_old) * grad_d) + .5 * (gamma / step_size_d) * torch.norm(d - d_old, 'fro') ** 2
-            #
-            #     flag = False
-            #     index_i_d = 0
-            #     while not flag and not flag_d:
-            #         dv_i_lint = 0
-            #
-            #         d_new = d_old + (delta ** index_i_d) * d_d
-            #         loss_new = 0
-            #         for index, (x, _) in enumerate(data_loader):
-            #             x = x.to(device=self.device)
-            #             dv = torch.tensordot(v[ind], d_new, dims=([1], [3]))
-            #             dv_i_lint = max(dv_i_lint, torch.max(torch.abs(dv)))
-            #             loss_new += (coeff * criterion(model(x + dv), target[index])).item()
-            #
-            #         if index_i_d == 0:
-            #             loss_cur = loss_new
-            #             d_cur = d_new
-            #             dv_i_lint_cur = dv_i_lint
-            #
-            #         # Check the sufficient decrease condition
-            #         if loss_new <= loss_old_d + beta * (delta ** index_i_d) * h.item():
-            #             # Then its fine !
-            #             if loss_new >= loss_cur:
-            #                 d = d_cur
-            #                 loss_new = loss_cur
-            #                 index_i_d = 0
-            #                 dv_i_lint = dv_i_lint_cur
-            #             else:
-            #                 d = d_new
-            #             flag = True
-            #         else:
-            #             # Then we need to change index_i
-            #             index_i_d = index_i_d + 1
-            #             if index_i_d > 10:
-            #                 # We have reached a stationary point
-            #                 flag = True
-            #                 flag_d = True
-            #
-            #     index_d.append(index_i_d)
-            #     if len(index_d) >= 5 and min(index_d[-5:]) > 0:
-            #         step_size_d = step_size_d * delta**min(index_d[-5:])
-            #     # print('index = {} and d_update loss = {} and lint of dv = {}'.format(index_i_d, loss_new, dv_i_lint))
-            #
-            #     if flag_v and flag_d:
-            #         break
-            #     # Keep track of loss
-            #     loss_all[iteration] = loss_new
+            if rank == 0:
+                fooling_rate_all.append(fooling_sample.item() / n_img)
+                loss_all.append(loss_full.item())
+
         if rank == 0:
             torch.save([ddp_model.module, loss_all, fooling_rate_all], self.model_file)
 
@@ -1200,3 +765,47 @@ class ADIL(Attack):
         adversary = images + dv
 
         return torch.clamp(adversary, min=0, max=1)
+
+    def projection_v(self, var):
+        if self.norm == 'l2':
+            """ In order to respect l2 bound, v has to lie inside a l2-ball """
+            v_norm = torch.norm(var, p='fro', dim=1, keepdim=True)
+            return self.eps * torch.div(var, torch.maximum(v_norm, self.eps * torch.ones_like(v_norm)))
+
+        elif self.norm == 'linf':
+            """ In order to respect linf bound, v has to lie inside a l1-ball """
+            return project_onto_l1_ball(var, eps=self.alpha)
+
+    def projection_d(self, var):
+        if self.norm == 'l2':
+            """ In order to respect l2 bound, D has to lie inside a l2 unit ball """
+            return constraint_dict(var, constr_set='l2ball')
+
+        elif self.norm == 'linf':
+            """ In order to respect l2 bound, D has to lie inside a linf unit ball """
+            return torch.clamp(var, min=-1, max=1)
+
+    def sample_sphere(self, n_samples):
+        if self.norm == 'l2':
+            """ In order to respect l2 bound, sample v on a l2-sphere """
+            var = (2 * torch.rand(n_samples, self.n_atoms) - 1)
+            # var = torch.randn(n_samples, self.n_atoms)
+            v_norm = torch.norm(var, p='fro', dim=1, keepdim=True)
+            return self.eps * torch.div(var, v_norm)
+        elif self.norm == 'linf':
+            """ Sample 'sparse' v on the l1-sphere """
+            m = torch.distributions.uniform.Uniform(torch.tensor([self.alpha]), torch.tensor([2*self.alpha]))
+            # p = torch.distributions.uniform.Uniform(torch.tensor([-1.0]), torch.tensor([1.0]))
+            var_raw = m.sample(sample_shape=[n_samples, self.n_atoms])[:, :, 0]
+            # var_sgn = p.sample(sample_shape=[n_samples, self.n_atoms])[:, :, 0]
+            # var_sgn = np.random.choice([-1, 1], n_samples*self.n_atoms).reshape(n_samples, self.n_atoms)
+            # var_sgn = torch.from_numpy(var_sgn)
+            # var = torch.mul(var_sgn, var_raw)
+            return self.projection_v(var_raw)
+
+    def get_target(self, data_loader):
+        """ Output the target or label to fool depending on self.targeted """
+        target = []
+        for index, (x, y) in enumerate(data_loader):
+            target.append(get_target(x.to(device=self.device), y.to(device=self.device), self.targeted, self.model))
+        return target

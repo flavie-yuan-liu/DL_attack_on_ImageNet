@@ -7,23 +7,10 @@ from tqdm import tqdm
 from torch.autograd import Variable
 from torchvision.transforms import transforms
 
-def transform_Img(x):
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-    normalize = transforms.Normalize(mean=mean, std=std)
-    return normalize(x)
-
-def transform_inv_Img(x):
-    inv_normalize = transforms.Normalize(
-        mean=[-0.485 / 0.229, -0.456 / 0.224, -0.406 / 0.225],
-        std=[1 / 0.229, 1 / 0.224, 1 / 0.225]
-    )
-    return inv_normalize(x)
 
 def proj_lp(v, xi, p):
 
     # Project on the lp ball centered at 0 and of radius xi
-
     # SUPPORTS only p = 2 and p = Inf for now
     if p == 2:
         v = v * min(1, xi/np.linalg.norm(v.flatten(1)))

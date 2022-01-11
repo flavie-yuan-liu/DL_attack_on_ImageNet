@@ -3,7 +3,7 @@ import os
 import torch
 import torchvision.models as models
 from torch.utils.data import random_split
-from attacks import ADILR, ADIL
+from attacks import ADILR, ADIL, UAPPGD, FastUAP
 import numpy as np
 import performance as perf
 from DS_ImageNet import DS_ImageNet
@@ -11,7 +11,6 @@ from imagenet_loading import load_ImageNet, dataset_split_by_class
 import torchattacks
 import random
 import model_accuracy
-
 
 
 class Normalize(torch.nn.Module):
@@ -35,12 +34,10 @@ def main(args):
     if not args.distributed:
         torch.cuda.set_device(0)
         device = torch.device(0)
-    torch.backends.cudnn.benchmark = True
 
     # ------------------------------------------------------------------------
     # loading model (densenet, googlenet, inception, mobilenetv2, resnet, vgg)
     # ------------------------------------------------------------------------
-
     model_name = args.model.lower()
     if model_name == 'resnet':
         model = models.resnet18(pretrained=True, progress=False)
@@ -60,12 +57,11 @@ def main(args):
         norm_layer,
         model
     )
-    model.eval()
+    # model.eval()
 
     # ----------------------------------------------------------------------
     # loading imagenet data
     # ----------------------------------------------------------------------
-
     dataset, classes = load_ImageNet()
     # if args.distributed:
     #     acc = model_accuracy.run_accuracy_computing(args, dataset, model)
@@ -74,7 +70,7 @@ def main(args):
     # print("accuracy of the the model {} is {}".format(model_name, acc*100))
 
     # Set the number of samples for training
-    num_train_per_class = 2  # set the number of samples for training 10 x number of classes
+    num_train_per_class = 1  # set the number of samples for training 10 x number of classes
     num_val_per_class = 2
     num_test_per_class = 5
 
@@ -91,55 +87,40 @@ def main(args):
     # hyper-parameter selecting
     # ----------------------------------------------------------------------
 
-    # lambda_grid_l1 = np.logspace(start=-4, stop=-4, num=1)
+    # lambda_grid_l1 = np.logspace(start=-4, stop=-4, num=1)  # params for regularized adil
     # lambda_grid_l2 = np.logspace(start=-4, stop=-4, num=1)
     n_atoms_grid = np.array([1, 10, 50, 100])
-    log_grid_small = np.logspace(start=-1, stop=4, num=5)
+    # log_grid_small = np.logspace(start=-1, stop=4, num=5)
     # log_grid_step_size = np.logspace(start=-3, stop=-1, num=3)
     eps = 8/255
     norm = 'linf'
-    num_trials_grid = [10]
-    steps_in_grid = 100
-
+    # num_trials_grid = [10]
     # eps = [0.5]
     # norm = 'l2'
-
     '''
-    FGSM(model, eps=8/255),
-    FFGSM(model, eps=8/255, alpha=10/255),
-    CW(model, c=1, lr=0.01, steps=100, kappa=0),
-    DeepFool(model, steps=100),
-    PGD(model, eps=8/255, alpha=2/225, steps=100, random_start=True),
-    PGDL2(model, eps=8/255, alpha=0.2, steps=100),
-    
     BIM(model, eps=8/255, alpha=2/255, steps=100),
     RFGSM(model, eps=8/255, alpha=2/255, steps=100),
     EOTPGD(model, eps=8/255, alpha=2/255, steps=100, eot_iter=2),
     TPGD(model, eps=8/255, alpha=2/255, steps=100),
-    MIFGSM(model, eps=8/255, alpha=2/255, steps=100, decay=0.1),
     VANILA(model),
     GN(model, sigma=0.1),
-    APGD(model, eps=8/255, steps=100, eot_iter=1, n_restarts=1, loss='ce'),
-    APGD(model, eps=8/255, steps=100, eot_iter=1, n_restarts=1, loss='dlr'),
-    APGDT(model, eps=8/255, steps=100, eot_iter=1, n_restarts=1),
     FAB(model, eps=8/255, steps=100, n_classes=10, n_restarts=1, targeted=False),
     FAB(model, eps=8/255, steps=100, n_classes=10, n_restarts=1, targeted=True),
     Square(model, eps=8/255, n_queries=5000, n_restarts=1, loss='ce'),
-    AutoAttack(model, eps=8/255, n_classes=10, version='standard'),
     OnePixel(model, pixels=5, inf_batch=50),
     DIFGSM(model, eps=8/255, alpha=2/255, steps=100, diversity_prob=0.5, resize_rate=0.9)
     '''
 
     attacks_hyper = {
-        # 'ADiLR': perf.get_atks(model.to(device), ADILR, 'lambda_l1', lambda_grid_l1, 'lambda_l2', lambda_grid_l2,
+        # 'ADiLR': perf.get_atks(model, ADILR, 'lambda_l1', lambda_grid_l1, 'lambda_l2', lambda_grid_l2,
         #                       'n_atoms', n_atoms_grid, version='stochastic', data_train=train_dataset, device=device,
-        #                       batch_size=100, model_name=model_name, steps=150, attack_conditioned='atoms'),Text(0.5, 124.8322222222222, 'number of trials with computing time 30-38s, 122-132s, 524-552s, 1023-1072s, 5014-5222s, 10033-10420s')
-
-        # 'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, 'trials', num_trials_grid, steps_in=100,
-        #                       data_train=train_dataset, data_val=val_dataset, norm=norm, attack='unsupervised',
-        #                       eps=eps, steps=1000, targeted=False, step_size=1, batch_size=50, model_name=model_name),
+        #                       batch_size=100, model_name=model_name, steps=150, attack_conditioned='atoms'),
+        # 'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, data_train=train_dataset, norm=norm,
+        #                       attack='supervised', eps=eps, steps=1000, targeted=False, step_size=1, batch_size=128,
+        #                       model_name=model_name, is_distributed=args.distributed, steps_in=200, loss='ce',
+        #                       method='alter'), # method='gd' or 'alter'; loss='ce' or 'logits'
         # --------------------------------------- Other attacks --------------------------------------------- #
-        # 'DeepFool': perf.get_atks(model.to(device), torchattacks.DeepFool, steps=100),
+        # 'DeepFool': perf.get_atks(model.to(device), DeepFool, steps=100),
         # 'CW': perf.get_atks(model.to(device), torchattacks.CW, 'c', log_grid_small, steps=100, lr=0.001),
         # 'FGSM': perf.get_atks(model.to(device), torchattacks.FGSM, eps=eps),
         # 'FFGSM': perf.get_atks(model.to(device), torchattacks.FFGSM, alpha=10/255, eps=eps),
@@ -147,9 +128,13 @@ def main(args):
         # 'PGD': perf.get_atks(model.to(device), torchattacks.PGD, eps=eps, alpha=2 / 255, steps=100, random_start=True),
         # --------------------------------- Attacks with l2-ball constraint --------------------------------- #
         # Optimal since eps = radius of ball ** 2
-        # 'PGDL2': perf.get_atks(model.to(device), torchattacks.PGDL2, alpha=0.2, eps=eps, steps=100),
-        'APGD': perf.get_atks(model.to(device), torchattacks.APGD, loss='ce', norm='Linf', eps=eps, steps=100),
-        'AutoAttack': perf.get_atks(model.to(device), torchattacks.AutoAttack, norm='Linf', eps=eps, n_classes=1000),
+        # 'APGD': perf.get_atks(model.to(device), torchattacks.APGD, loss='ce', norm='Linf', eps=eps, steps=100),
+        # 'AutoAttack': perf.get_atks(model.to(device), torchattacks.AutoAttack, norm='Linf', eps=eps, n_classes=1000),
+        # ------------------------------------------Universal Attack---------------------------------------------------
+        'UAP_PGD': perf.get_atks(model.to(device), UAPPGD, eps=eps, data_train=train_dataset, data_val=val_dataset,
+                                 norm=norm, steps=100, model_name=model_name),
+        'FastUAP': perf.get_atks(model.to(device), FastUAP, eps=eps, steps_deepfool=50, data_train=train_dataset,
+                                data_val=val_dataset, norm=norm, steps=10, model_name=model_name)
 
     }
 
@@ -169,7 +154,7 @@ if __name__ == '__main__':
     argparser.add_argument(
         '--model', '-m',
         metavar='M',
-        default='vgg',
+        default='inception',
     )
     argparser.add_argument(
         '--seed', '-s',
@@ -192,14 +177,21 @@ if __name__ == '__main__':
         default=False,
         help='If distributed data parallel used, default value is False'
     )
+    argparser.add_argument(
+        '--gpu',
+        type=int,
+        default=0,
+        help='select number of class for training, default is 0'
+    )
 
     args = argparser.parse_args()
 
-    seed = args.seed  # Do from 1 to 5
-    torch.random.manual_seed(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    main(args)
+    for seed in range(1, 6):
+        # seed = args.seed  # Do from 1 to 5
+        torch.random.manual_seed(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        main(args)
 
 
 
