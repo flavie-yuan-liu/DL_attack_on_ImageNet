@@ -4,7 +4,7 @@ import torch
 
 from attacks.utils import *
 import torchattacks
-torch.set_default_tensor_type(torch.DoubleTensor)
+# torch.set_default_tensor_type(torch.DoubleTensor)
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel
@@ -45,8 +45,8 @@ class UAPPGD(Attack):
         self.eps = eps
         self.optimizer = optimizer
 
-        root = 'dict_model_ImageNet_version_constrained/{}_uappgd/trained_dicts'.format(model_name)
-        self.model_name = os.path.join(root, 'UAPPGD_model')
+        root = 'dict_model_ImageNet_version_constrained/'
+        self.model_name = os.path.join(root, 'UAPPGD_model_test.bin')
 
         if not os.path.exists(self.model_name):
             if distributed:
@@ -87,11 +87,14 @@ class UAPPGD(Attack):
         v = torch.ones((self.batch_size, 1), device=self.device)
 
         for _ in trange(int(self.steps)):
+            fool_s = 0
             for x, y in data_loader:
                 x, y = x.to(self.device), y.to(self.device)
                 optimizer.zero_grad()
-                x_attack = torch.tensordot(v, attack, dims=([1], [0]))
-                loss = -1*criterion(self.model(x_attack), y)
+                x_attack = torch.tensordot(v, attack, dims=([1], [0]))+x
+                output = self.model(x_attack)
+                fool_s += torch.sum(output.argmax(-1) != y)
+                loss = -1*criterion(output, y)
                 loss = torch.clamp_min(loss, min=-self.beta)
                 loss.backward()
                 optimizer.step()
@@ -99,7 +102,7 @@ class UAPPGD(Attack):
                 with torch.no_grad():
                     attack.data = self.project(attack.data)
             fooling_rate.append(compute_fooling_rate(dataset=val, attack=attack, model=self.model, device=self.device))
-            print(fooling_rate[-1])
+            print(fool_s/200, fooling_rate[-1])
 
         torch.save([attack, fooling_rate], self.model_name)
 

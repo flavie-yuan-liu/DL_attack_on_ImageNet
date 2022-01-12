@@ -11,7 +11,7 @@ import torch.nn as nn
 from torch.autograd import Variable
 from torch.autograd.gradcheck import zero_gradients
 from tqdm import trange, tqdm
-torch.set_default_tensor_type(torch.DoubleTensor)
+# torch.set_default_tensor_type(torch.DoubleTensor)
 
 
 class FastUAP(Attack):

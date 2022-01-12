@@ -70,7 +70,7 @@ def main(args):
     # print("accuracy of the the model {} is {}".format(model_name, acc*100))
 
     # Set the number of samples for training
-    num_train_per_class = 1  # set the number of samples for training 10 x number of classes
+    num_train_per_class = 2  # set the number of samples for training 10 x number of classes
     num_val_per_class = 2
     num_test_per_class = 5
 
@@ -89,7 +89,7 @@ def main(args):
 
     # lambda_grid_l1 = np.logspace(start=-4, stop=-4, num=1)  # params for regularized adil
     # lambda_grid_l2 = np.logspace(start=-4, stop=-4, num=1)
-    n_atoms_grid = np.array([1, 10, 50, 100])
+    n_atoms_grid = np.array([10])
     # log_grid_small = np.logspace(start=-1, stop=4, num=5)
     # log_grid_step_size = np.logspace(start=-3, stop=-1, num=3)
     eps = 8/255
@@ -115,11 +115,14 @@ def main(args):
         # 'ADiLR': perf.get_atks(model, ADILR, 'lambda_l1', lambda_grid_l1, 'lambda_l2', lambda_grid_l2,
         #                       'n_atoms', n_atoms_grid, version='stochastic', data_train=train_dataset, device=device,
         #                       batch_size=100, model_name=model_name, steps=150, attack_conditioned='atoms'),
-        # 'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, data_train=train_dataset, norm=norm,
-        #                       attack='supervised', eps=eps, steps=1000, targeted=False, step_size=1, batch_size=128,
-        #                       model_name=model_name, is_distributed=args.distributed, steps_in=200, loss='ce',
-        #                       method='alter'), # method='gd' or 'alter'; loss='ce' or 'logits'
+        'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, data_train=train_dataset, norm=norm,
+                              attack='supervised', eps=eps, steps=150, targeted=False, step_size=0.01, batch_size=128,
+                              model_name=model_name, is_distributed=args.distributed, steps_in=1, loss='ce',
+                              method='alter', data_val=val_dataset, warm_start=False),
+        # method='gd' or 'alter'; loss='ce' or 'logits'
+        #######################################################################################################
         # --------------------------------------- Other attacks --------------------------------------------- #
+        #######################################################################################################
         # 'DeepFool': perf.get_atks(model.to(device), DeepFool, steps=100),
         # 'CW': perf.get_atks(model.to(device), torchattacks.CW, 'c', log_grid_small, steps=100, lr=0.001),
         # 'FGSM': perf.get_atks(model.to(device), torchattacks.FGSM, eps=eps),
@@ -131,22 +134,22 @@ def main(args):
         # 'APGD': perf.get_atks(model.to(device), torchattacks.APGD, loss='ce', norm='Linf', eps=eps, steps=100),
         # 'AutoAttack': perf.get_atks(model.to(device), torchattacks.AutoAttack, norm='Linf', eps=eps, n_classes=1000),
         # ------------------------------------------Universal Attack---------------------------------------------------
-        'UAP_PGD': perf.get_atks(model.to(device), UAPPGD, eps=eps, data_train=train_dataset, data_val=val_dataset,
-                                 norm=norm, steps=100, model_name=model_name),
-        'FastUAP': perf.get_atks(model.to(device), FastUAP, eps=eps, steps_deepfool=50, data_train=train_dataset,
-                                data_val=val_dataset, norm=norm, steps=10, model_name=model_name)
+        # 'UAP_PGD': perf.get_atks(model.to(device), UAPPGD, eps=eps, data_train=train_dataset, data_val=val_dataset,
+        #                          norm=norm, steps=100, model_name=model_name),
+        # 'FastUAP': perf.get_atks(model.to(device), FastUAP, eps=eps, steps_deepfool=50, data_train=train_dataset,
+        #                         data_val=val_dataset, norm=norm, steps=10, model_name=model_name)
 
     }
 
-    # print('Evaluation process')
-    # val_perf = perf.get_performance(attacks_hyper, model, val_loader, device=device)
-    # param_selection_file = 'dict_model_ImageNet_version_constrained/model_adil_resultat_for_param_selecting.bin'
-    # torch.save(val_perf, param_selection_file)
+    print('Evaluation process')
+    val_perf = perf.get_performance(attacks_hyper, model, val_loader, device=device)
+    param_selection_file = 'dict_model_ImageNet_version_constrained/model_adil_resultat_for_param_selecting.bin'
+    torch.save(val_perf, param_selection_file)
 
-    print('Test process')
-    test_perf = perf.get_performance(attacks_hyper, model, test_loader, device=device)
-    param_selection_file = 'dict_model_ImageNet_version_constrained/model_baseline_resultat_test.bin'
-    torch.save(test_perf, param_selection_file)
+    # print('Test process')
+    # test_perf = perf.get_performance(attacks_hyper, model, test_loader, device=device)
+    # param_selection_file = 'dict_model_ImageNet_version_constrained/model_baseline_resultat_test.bin'
+    # torch.save(test_perf, param_selection_file)
 
 
 if __name__ == '__main__':
@@ -154,7 +157,7 @@ if __name__ == '__main__':
     argparser.add_argument(
         '--model', '-m',
         metavar='M',
-        default='inception',
+        default='vgg',
     )
     argparser.add_argument(
         '--seed', '-s',
@@ -167,7 +170,7 @@ if __name__ == '__main__':
         '--trained-classes',
         metavar='TC',
         type=int,
-        default=1000,
+        default=100,
         help='number of class for training'
     )
     argparser.add_argument(
@@ -186,12 +189,12 @@ if __name__ == '__main__':
 
     args = argparser.parse_args()
 
-    for seed in range(1, 6):
-        # seed = args.seed  # Do from 1 to 5
-        torch.random.manual_seed(seed)
-        random.seed(seed)
-        np.random.seed(seed)
-        main(args)
+    #for seed in range(1, 6):
+    seed = args.seed  # Do from 1 to 5
+    torch.random.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    main(args)
 
 
 
