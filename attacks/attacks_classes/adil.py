@@ -841,10 +841,10 @@ class ADIL(Attack):
             # compute loss with model
             output = adil_model(images, range(n_img), self.model.to(self.device))
             fooling_sample = torch.sum(output.argmax(-1) != labels)
-            # if self.loss == 'ce':
-            loss = coeff * criterion(output, labels)
-            # elif self.loss == 'logits':
-            #     loss = self.f_loss(output, labels).sum()
+            if self.loss == 'ce':
+                loss = coeff * criterion(output, labels)
+            elif self.loss == 'logits':
+                loss = self.f_loss(output, labels).sum()
 
             loss.backward()
             v_old = adil_model.v.data.detach().clone()
