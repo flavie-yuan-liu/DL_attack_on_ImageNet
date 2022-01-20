@@ -6,14 +6,19 @@ import torch
 
 import hostlist
 
-hostnames = hostlist.expand_hostlist(os.environ['SLURM_JOB_NODELIST'])
-IP = hostnames[0]
-gpu_ids = os.environ['SLURM_STEP_GPUS'].split(",")
-world_size =  int(os.environ['SLURM_NTASKS'])
-nodes =  int(os.environ['SLURM_JOB_NUM_NODES'])
-rank = int(os.environ['SLURM_PROCID'])
-local_rank = int(os.environ['SLURM_LOCALID'])
+# hostnames = hostlist.expand_hostlist(os.environ['SLURM_JOB_NODELIST'])
+# IP = hostnames[0]
+# gpu_ids = os.environ['SLURM_STEP_GPUS'].split(",")
+# world_size =  int(os.environ['SLURM_NTASKS'])
+# nodes =  int(os.environ['SLURM_JOB_NUM_NODES'])
+# rank = int(os.environ['SLURM_PROCID'])
+# local_rank = int(os.environ['SLURM_LOCALID'])
 
+IP =1
+gpu_ids=[1]
+world_size = 4
+rank = 4
+local_rank = 1
 
 def dist_init(rank, world_size, port=str(12345 + int(min(gpu_ids))), host_addr=IP):
     host_addr_full = f"tcp://{host_addr}:{str(port)}"
