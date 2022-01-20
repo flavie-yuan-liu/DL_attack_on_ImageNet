@@ -3,7 +3,7 @@ import os
 import torch
 import torchvision.models as models
 from torch.utils.data import random_split
-from attacks import ADILR, ADIL, UAPPGD, FastUAP
+from attacks import ADILR, ADIL  # , UAPPGD, FastUAP
 import numpy as np
 import performance as perf
 from DS_ImageNet import DS_ImageNet
@@ -94,6 +94,9 @@ def main(args):
     # log_grid_step_size = np.logspace(start=-3, stop=-1, num=3)
     eps = 8/255
     norm = 'linf'
+    alpha_grid = [0/255]
+    kappa_grid = [0, 5, 10, 15, 20]
+
     # num_trials_grid = [10]
     # eps = [0.5]
     # norm = 'l2'
@@ -115,10 +118,16 @@ def main(args):
         # 'ADiLR': perf.get_atks(model, ADILR, 'lambda_l1', lambda_grid_l1, 'lambda_l2', lambda_grid_l2,
         #                       'n_atoms', n_atoms_grid, version='stochastic', data_train=train_dataset, device=device,
         #                       batch_size=100, model_name=model_name, steps=150, attack_conditioned='atoms'),
-        'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, data_train=train_dataset, norm=norm,
-                              attack='supervised', eps=eps, steps=150, targeted=False, step_size=0.01, batch_size=128,
-                              model_name=model_name, is_distributed=args.distributed, steps_in=1, loss='ce',
+        'adil': perf.get_atks(model.to(device), ADIL, 'alpha', alpha_grid, 'kappa', kappa_grid, n_atoms=10,
+                              data_train=train_dataset, norm=norm, attack='supervised', eps=eps, steps=50,
+                              targeted=False, step_size=0.01, batch_size=100,
+                              model_name=model_name, is_distributed=args.distributed, steps_in=1, loss='logits',
                               method='alter', data_val=val_dataset, warm_start=False),
+        # method='gd' or 'alter'; loss='ce' or 'logits
+        # 'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, data_train=train_dataset, norm=norm,
+        #                       attack='supervised', eps=eps, steps=150, targeted=False, step_size=0.01, batch_size=128,
+        #                       model_name=model_name, is_distributed=args.distributed, steps_in=1, loss='logits',
+        #                       method='alter', data_val=val_dataset, warm_start=False),
         # method='gd' or 'alter'; loss='ce' or 'logits'
         #######################################################################################################
         # --------------------------------------- Other attacks --------------------------------------------- #

@@ -60,7 +60,7 @@ class ADIL(Attack):
 
     def __init__(self, model, eps=None, steps=1e2, norm='L2', targeted=True, n_atoms=10, batch_size=None,
                  data_train=None, data_val=None, trials=10, attack='supervised', model_name=None, step_size=0.01,
-                 is_distributed=False, steps_in=None, loss='ce', method='gd', warm_start=False, alpha=1/255):
+                 is_distributed=False, steps_in=None, loss='ce', method='gd', warm_start=False, alpha=0/255, kappa=0):
 
         super().__init__("ADIL", model.eval())
         # Attack parameters
@@ -81,10 +81,12 @@ class ADIL(Attack):
         self.loss = loss
         self.model_name = model_name
         self.method = method
+        self.kappa = kappa
 
         # path = f"trained_dicts /"
         path = f"dict_model_ImageNet_version_constrained/"
-        model_file = f"ImageNet_{model_name}_num_atom_{self.n_atoms}_nepoch_{self.steps}_v_step_{steps_in}_d_step_{steps_in}" \
+        model_file = f"ImageNet_{model_name}_num_atom_{self.n_atoms}_nepoch_{self.steps}_kappa_{self.kappa}_alpha_" \
+                     f"{alpha}_v_step_{steps_in}_d_step_{steps_in}" \
                      f"_sep_{len(data_train)}_{loss}_method_{method}.bin"
         self.model_file = os.path.join(path, model_file)
 
@@ -100,10 +102,9 @@ class ADIL(Attack):
                 self.learn_dictionary_distributed(data_train)
             else:
                 if method == 'gd':
-                    self.learn_dictionary_a(dataset=data_train, warm_start=True)
+                    self.learn_dictionary_a(dataset=data_train, val=data_val, warm_start=warm_start)
                 elif method == 'alter':
-                    self.learn_dictionary_b(dataset=data_train, warm_start=True)
-
+                    self.learn_dictionary_b(dataset=data_train, val=data_val, warm_start=warm_start)
 
     def f_loss(self, outputs, labels):
         one_hot_labels = torch.eye(len(outputs[0]))[labels].to(self.device)
@@ -112,9 +113,9 @@ class ADIL(Attack):
         j = torch.masked_select(outputs, one_hot_labels.bool()) # get the largest logit
 
         if self._targeted:
-            return torch.clamp((i-j), min=0)
+            return torch.clamp((i-j), min=-self.kappa)
         else:
-            return torch.clamp((j-i), min=0)
+            return torch.clamp((j-i), min=-self.kappa)
 
     def learn_dictionary_a(self, dataset, val, warm_start):
         """ Learn the adversarial dictionary """
@@ -133,10 +134,10 @@ class ADIL(Attack):
         data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True,
                                                   num_workers=0)
         val_loader = torch.utils.data.DataLoader(val, batch_size=batch_size, shuffle=True, pin_memory=True,
-                                                 num_workers=True)
+                                                 num_workers=0)
 
         # Function
-        criterion = nn.CrossEntropyLoss(reduction='mean')
+        criterion = nn.CrossEntropyLoss(reduction='sum')
 
         # Initialization of the dictionary D and coding vectors v
         if warm_start:
@@ -153,7 +154,7 @@ class ADIL(Attack):
         v = self.projection_v(torch.rand(n_img, self.n_atoms, device=self.device))
 
         # initialized model
-        adil_model = Attack_dict_model(d, v, self.eps-self.alpha).to(self.device)
+        adil_model = Attack_dict_model(d, v, self.eps+self.alpha).to(self.device)
         # optimise = torch.optim.AdamW([
         #     {'params': adil_model.d, 'lr': 0.02},
         #     {'params': adil_model.v}
@@ -168,11 +169,13 @@ class ADIL(Attack):
         bar = trange(int(self.steps))
         for iteration in bar:
             # Gradients and loss computations
+            adil_model.train()
             loss_full = 0
             fooling_sample = 0
             for index, x, label in data_loader:
                 # Load data
                 x, label = x.to(device=self.device), label.to(device=self.device)
+                label = self.model(x).argmax(dim=-1)
 
                 # compute loss with model
                 optimise.zero_grad()
@@ -192,13 +195,16 @@ class ADIL(Attack):
                 with torch.no_grad():
                     loss_full += loss
 
-            loss_all.append(loss_full.item())
+            loss_all.append(loss_full.item()/n_img)
             fooling_rate_all.append(fooling_sample.item()/n_img)
             print(loss_all[-1], fooling_sample/n_img)
 
             fool_on_valset = 0
+            adil_model.eval()
             for x, label in val_loader:
-                fool_on_valset += self.forward_supervised_AdamW(x, label, adil_model.d.data, 'train')
+                fool_sample = self.forward_supervised_AdamW(x, label, adil_model.d.data, 'train')
+                with torch.no_grad():
+                    fool_on_valset += fool_sample
             print(fool_on_valset/len(val))
 
             if iteration > 1 and abs(loss_all[iteration] - loss_all[iteration - 1]) < 1e-6:
@@ -221,12 +227,12 @@ class ADIL(Attack):
         # Data loader
         dataset.indexed = True
         data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True,
-                                                  num_workers=4)
+                                                  num_workers=0)
         val_loader = torch.utils.data.DataLoader(val, batch_size=batch_size, shuffle=True, pin_memory=True,
-                                                 num_workers=True)
+                                                 num_workers=0)
 
         # Function
-        criterion = nn.CrossEntropyLoss(reduction='mean')
+        criterion = nn.CrossEntropyLoss(reduction='sum')
 
         # Initialization of the dictionary D and coding vectors v
         if warm_start:
@@ -255,6 +261,8 @@ class ADIL(Attack):
         # bar = trange(int(self.steps))
         bar = range(int(self.steps//self.steps_inner))
         for iteration in bar:
+            adil_model.train()
+            print('iteration', iteration)
             # Gradients and loss computations
             # v_step
             for _ in range(self.steps_inner):
@@ -263,6 +271,7 @@ class ADIL(Attack):
                 for index, x, label in data_loader:
                     # Load data
                     x, label = x.to(device=self.device), label.to(device=self.device)
+                    label = self.model(x).argmax(dim=-1)
                     adil_model.d.requires_grad = False
                     adil_model.v.requires_grad = True
                     output = adil_model(x, index, self.model)
@@ -280,7 +289,7 @@ class ADIL(Attack):
                     with torch.no_grad():
                         loss_full += loss
 
-                print(loss_full, fooling_sample / n_img)
+                print('v_step: ', loss_full.item()/n_img, fooling_sample.item() / n_img)
 
             # d_step
             for _ in range(self.steps_inner):
@@ -289,6 +298,7 @@ class ADIL(Attack):
                 for index, x, label in data_loader:
                     # Load data
                     x, label = x.to(device=self.device), label.to(device=self.device)
+                    label = self.model(x).argmax(dim=-1)
                     adil_model.v.requires_grad = False
                     adil_model.d.requires_grad = True
                     output = adil_model(x, index, self.model)
@@ -307,14 +317,17 @@ class ADIL(Attack):
                     loss_full += loss
 
                     # print('d_step loss', loss_full)
-            loss_all.append(loss_full.item())
+            loss_all.append(loss_full.item()/n_img)
             fooling_rate_all.append(fooling_sample.item() / n_img)
 
-            print(loss_all[-1], fooling_sample/n_img)
+            print('d_step: ', loss_all[-1], fooling_sample.item()/n_img)
             fool_on_valset = 0
+            adil_model.eval()
             for x, label in val_loader:
-                fool_on_valset += self.forward_supervised_AdamW(x, label, adil_model.d.data, 'train')
-            print(fool_on_valset / len(val))
+                fool_sample = self.forward_supervised_AdamW(x, label, adil_model.d.data, 'train')
+                with torch.no_grad():
+                    fool_on_valset += fool_sample
+            print('result on val set: ', fool_on_valset.item() / len(val))
 
             if iteration > 1 and abs(loss_all[iteration] - loss_all[iteration - 1]) < 1e-6:
                 break
@@ -504,7 +517,7 @@ class ADIL(Attack):
             dataset = QuickAttackDataset(images=images, labels=labels)
             self.learn_dictionary(dataset=dataset, model=self.model)
 
-        self.dictionary, _, _, _ = torch.load(self.model_file)
+        self.dictionary, _, _, _, _ = torch.load(self.model_file)
 
         if self.attack == 'supervised':
             ''' Supervised attack where the coding vectors are optimized '''
@@ -822,7 +835,7 @@ class ADIL(Attack):
         # Initialization of intermediate variables
         loss_track = []
 
-        adil_model = Attack_dict_model(d, v, eps=self.eps).to(self.device)
+        adil_model = Attack_dict_model(d, v, eps=self.eps+self.alpha).to(self.device)
         adil_model.d.requires_grad = False
         optimise = torch.optim.AdamW([adil_model.v], lr=1e-2)
 
@@ -837,10 +850,9 @@ class ADIL(Attack):
 
             # Load data
             images, labels = images.to(device=self.device), labels.to(device=self.device)
-
+            labels = self.model(images).argmax(dim=-1)
             # compute loss with model
             output = adil_model(images, range(n_img), self.model.to(self.device))
-            fooling_sample = torch.sum(output.argmax(-1) != labels)
             if self.loss == 'ce':
                 loss = coeff * criterion(output, labels)
             elif self.loss == 'logits':
@@ -857,10 +869,11 @@ class ADIL(Attack):
             if (adil_model.v.data-v_old).abs().max() < 1e-6:
                 break
 
+        dv = torch.tensordot(self.projection_v(adil_model.v.data), adil_model.d.data, dims=([1], [3]))
+
         if model == 'train':
-            return fooling_sample
+            return torch.sum(self.model(images+dv).argmax(-1) != labels)
         else:
-            dv = torch.tensordot(self.projection_v(adil_model.v.data), adil_model.d.data, dims=([1], [3]))
             adversary = images + dv
             return torch.clamp(adversary, min=0, max=1)
 
@@ -872,7 +885,7 @@ class ADIL(Attack):
 
         elif self.norm == 'linf':
             """ In order to respect linf bound, v has to lie inside a l1-ball """
-            return project_onto_l1_ball(var, eps=self.alpha)
+            return project_onto_l1_ball(var, eps=self.eps)
 
     def projection_d(self, var):
         if self.norm == 'l2':
