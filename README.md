@@ -1,18 +1,20 @@
 # DL_attack_on_ImageNet
 
-A Pytorch implementation of attack learning based on dictionary leanring, specially for the Imagenet Dataset. The implementation for CIFAR10 can be found in https://github.com/lucasanquetil/Sparse-Dictionary-Attack.git
+Implementation of attack learning algorithm based on dictionary leanring, specially for the Imagenet Dataset. 
 
-## Training
 
-### data loading
-You can create training data of imagenet by running DS_ImageNet.py. Then, a file named imagenet1000.bin will be created. Or you can special your data name by setting --file-samples-dataset and data path --root. Here we use only 10000 samples of the data in validation set for attack dictionary training). You can also create data with train data by setting --split. In the script, we assume the data is save in ILSVC/Data/train and ILSVC/Data/val, you should change it if your path is different.
+> We have the trained model on 6 deep model, [download here]()
+> To see a simple example of adversarial image generation with our model, just run
+```
+python main.py
+```
 
-### Start the training:
-To train the dictionary for attack, we assume that you have already a trained deep network. Change the model load path to your own and begin the training.
+> You can also train your own model. 
+```
+python demo_dL_attack.py --model densenet
 
-By default, we attacked the resenet18 and trained a dictionary on 128 images, you can test with your own image by using the function attacks.DL_attack.make_adversarial_image
-
-## Evaluation
+```
+There are some parameters to regulate in ADiL attack, make your settings to have the optimal ones. 
 
 
 ## Reference:
