@@ -1,10 +1,31 @@
 from attacks.utils import *
 import torch
 import os
+import torch.nn as nn
 
 # ------------------------------------------------------------------------- #
 # -------------------------- DICTIONARY LEARNING -------------------------- #
 # ------------------------------------------------------------------------- #
+
+class Attack_dict_model(nn.Module):
+
+    def __init__(self, d, v, prox):
+        super(Attack_dict_model, self).__init__()
+        self.d = nn.Parameter(d)
+        self.v = nn.Parameter(v)
+        self.eps = prox
+
+    def forward(self, x, index, model):
+        dv = torch.tensordot(self.v[index, :], self.d, dims=([1], [3]))
+        output = model(x + dv)
+        return output, dv
+
+    def update_v(self):
+        prox_l1 = get_prox_l1(param=self.eps)
+        self.v.data = prox_l1(self.v.data)
+
+    def update_d(self):
+        self.d.data = constraint_dict(self.d.data)
 
 
 def adil(dataset, model, targeted=True, niter=1e3, lambdaCoding=1., l2_fool=1., batchsize=None, step_size=.1, n_atom=10,
@@ -669,24 +690,129 @@ class ADILR(Attack):
         elif attack == 'unsupervised' and (self.scale is None or self.mean is None):
             _, v, _ = torch.load(self.model_file)
             self.mean, self.scale = fit_laplace(v.detach().cpu())
+    # def learn_dictionary(self, dataset, model):
+    #     if self.version == 'deterministic':
+    #         """ Theoretically grounded implementation """
+    #         d, v, _ = adil(dataset=dataset, model=model.eval(), targeted=self.targeted, niter=self.steps,
+    #                        lambdaCoding=self.lambda_l1, l2_fool=self.lambda_l2, batchsize=None,
+    #                        step_size=self.step_size,
+    #                        n_atom=self.n_atoms, dict_set='l2ball', device=self.device)
+    #     else:
+    #         """ Fast stochastic implementation """
+    #         print('statistic attack learning, lambdaCoding={}, l2_fool={}, n_atoms={}'.format(self.lambda_l1, self.lambda_l2, self.n_atoms))
+    #
+    #         _, v = sadil_updated(dataset=dataset, model=model.eval(), targeted=self.targeted, nepochs=self.steps,
+    #                              lambdaCoding=self.lambda_l1, l2_fool=self.lambda_l2, batchsize=self.batch_size,
+    #                              stepsize=self.step_size, n_atom=self.n_atoms, dict_set='l2ball', device=self.device,
+    #                              model_file=self.model_file)
+    #
+    #     self.mean, self.scale = fit_laplace(v.detach().cpu())
 
-    def learn_dictionary(self, dataset, model):
-        if self.version == 'deterministic':
-            """ Theoretically grounded implementation """
-            d, v, _ = adil(dataset=dataset, model=model.eval(), targeted=self.targeted, niter=self.steps,
-                           lambdaCoding=self.lambda_l1, l2_fool=self.lambda_l2, batchsize=None,
-                           step_size=self.step_size,
-                           n_atom=self.n_atoms, dict_set='l2ball', device=self.device)
+    def f_loss(self, outputs, labels):
+        one_hot_labels = torch.eye(len(outputs[0]))[labels].to(self.device)
+
+        i, _ = torch.max((1-one_hot_labels)*outputs, dim=1) # get the second largest logit
+        j = torch.masked_select(outputs, one_hot_labels.bool()) # get the largest logit
+
+        if self._targeted:
+            return torch.clamp((i-j), min=-self.kappa)
         else:
-            """ Fast stochastic implementation """
-            print('statistic attack learning, lambdaCoding={}, l2_fool={}, n_atoms={}'.format(self.lambda_l1, self.lambda_l2, self.n_atoms))
+            return torch.clamp((j-i), min=-self.kappa)
 
-            _, v = sadil_updated(dataset=dataset, model=model.eval(), targeted=self.targeted, nepochs=self.steps,
-                                 lambdaCoding=self.lambda_l1, l2_fool=self.lambda_l2, batchsize=self.batch_size,
-                                 stepsize=self.step_size, n_atom=self.n_atoms, dict_set='l2ball', device=self.device,
-                                 model_file=self.model_file)
+    def learn_dictionary(self, dataset, val, warm_start):
+        """ Learn the adversarial dictionary """
+        dataset.indexed = False
+        # Shape parameters
+        n_img = len(dataset)
+        x, _ = next(iter(dataset))
+        nc, nx, ny = x.shape
 
-        self.mean, self.scale = fit_laplace(v.detach().cpu())
+        # Other parameters
+        batch_size = n_img if self.batch_size is None else self.batch_size
+        coeff = 1. if self.targeted else -1.
+
+        # Data loader
+        dataset.indexed = True
+        data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True,
+                                                  num_workers=0)
+        val_loader = torch.utils.data.DataLoader(val, batch_size=batch_size, shuffle=True, pin_memory=True,
+                                                 num_workers=0)
+
+        # Function
+        criterion = nn.CrossEntropyLoss(reduction='sum')
+
+        # Initialization of the dictionary D and coding vectors v
+        if warm_start:
+            path = f"dict_model_ImageNet_version_constrained/"
+            warm_start_file = f"ImageNet_{self.model_name}_num_atom_{self.n_atoms}_nepoch_{self.steps}_AdamW" \
+                         f"_{200}.bin"
+            d, _, _, _ = torch.load(os.path.join(path, warm_start_file))
+        else:
+            if self.norm.lower() == 'l2':
+                d = self.projection_d(torch.randn(nc, nx, ny, self.n_atoms, device=self.device))
+            else:
+                d = (-1 + 2*torch.rand(nc, nx, ny, self.n_atoms, device=self.device))
+
+        v = self.projection_v(torch.rand(n_img, self.n_atoms, device=self.device))
+
+        # initialized model
+        adil_model = Attack_dict_model(d, v, self.eps+self.alpha).to(self.device)
+        # optimise = torch.optim.AdamW([
+        #     {'params': adil_model.d, 'lr': 0.02},
+        #     {'params': adil_model.v}
+        # ], lr=5e-3)
+        optimise = torch.optim.AdamW(adil_model.parameters(), lr=self.step_size)
+
+        # Initialization of intermediate variables
+        loss_all = []
+        fooling_rate_all = []
+        # Algorithm
+        adil_model.train()
+        bar = trange(int(self.steps))
+        for iteration in bar:
+            # Gradients and loss computations
+            adil_model.train()
+            loss_full = 0
+            fooling_sample = 0
+            for index, x, label in data_loader:
+                # Load data
+                x, label = x.to(device=self.device), label.to(device=self.device)
+                label = self.model(x).argmax(dim=-1)
+
+                # compute loss with model
+                optimise.zero_grad()
+                output, dv = adil_model(x, index, self.model)
+                fooling_sample += torch.sum(output.argmax(dim=-1) != label)
+
+                if self.loss == 'ce':
+                    loss = coeff*criterion(output, label) + .5 * self.lambda_l2 * torch.sum(dv ** 2)
+                elif self.loss == 'logits':
+                    loss = self.f_loss(output, label).sum() + .5 * self.lambda_l2 * torch.sum(dv ** 2)
+
+                loss.backward()
+                optimise.step()
+                # adil_model.update_v()
+                adil_model.update_d()
+
+                with torch.no_grad():
+                    loss_full += loss
+
+            loss_all.append(loss_full.item()/n_img)
+            fooling_rate_all.append(fooling_sample.item()/n_img)
+            print(loss_all[-1], fooling_sample/n_img)
+
+            fool_on_valset = 0
+            adil_model.eval()
+            for x, label in val_loader:
+                fool_sample = self.forward_supervised_AdamW(x, label, adil_model.d.data, 'train')
+                with torch.no_grad():
+                    fool_on_valset += fool_sample
+            print(fool_on_valset/len(val))
+
+            if iteration > 1 and abs(loss_all[iteration] - loss_all[iteration - 1]) < 1e-6:
+                break
+
+        torch.save([adil_model.d.data, adil_model.v.data, loss_all, fooling_rate_all, fool_on_valset/len(val)], self.model_file)
 
     def forward_unsupervised_conditioned_atoms(self, images):
         """ Unsupervised attack to unseen examples

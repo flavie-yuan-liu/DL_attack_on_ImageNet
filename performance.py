@@ -117,6 +117,7 @@ def get_performance(atks, model, data, verbose=False, device=torch.device('cpu')
     fooling_rate = dict()
     rmse = dict()
     mse = dict()
+    time_cost = dict()
 
     # Get through all types of attacks
     for name in atks.keys():
@@ -126,9 +127,12 @@ def get_performance(atks, model, data, verbose=False, device=torch.device('cpu')
         fooling_rate_tmp = []
         rmse_tmp = []
         mse_tmp = []
+        time_tmp = []
 
         for atk in atks[name]:
             print('Attack Image learning with {}'.format(atk))
+            if name == 'adil':
+                sub_name = f'{name}_atoms_{atk.n_atoms}_loss_{atk.loss}_'
             start = time.time()
             perf_tmp = performance(attack=atk, model=model.to(device=device), data=data, device=device)
             end = time.time()
@@ -137,12 +141,14 @@ def get_performance(atks, model, data, verbose=False, device=torch.device('cpu')
             fooling_rate_tmp.append(perf_tmp['fooling_rate'])
             rmse_tmp.append(perf_tmp['rmse'])
             mse_tmp.append(perf_tmp['mse'])
+            time_tmp.append(end-start)
 
-        fooling_rate.update({name: fooling_rate_tmp})
-        rmse.update({name: rmse_tmp})
-        mse.update({name: mse_tmp})
+        fooling_rate.update({sub_name: fooling_rate_tmp})
+        rmse.update({sub_name: rmse_tmp})
+        mse.update({sub_name: mse_tmp})
+        time_cost.update({sub_name: time_tmp})
 
-    return {'fooling_rate': fooling_rate, 'rmse': rmse, 'mse': mse}
+    return {'fooling_rate': fooling_rate, 'rmse': rmse, 'mse': mse, 'time':time_cost}
 
 
 def performance(attack, model, data, device=torch.device('cpu')):
@@ -158,14 +164,10 @@ def performance(attack, model, data, device=torch.device('cpu')):
         ind = (pre==y)
         x, y = x[ind], y[ind]
         num_samples += torch.sum(ind)
-        # print(torch.sum(ind), torch.sum(ind)==0)
-        # start = time.time()
         adversary = attack(x, y)
-        # print('single batch adversarial image processing time: {}'.format(time.time()-start))
         fooling += compute_fooling_rate(model=model.eval(), adversary=adversary, clean=x)
         rmse += compute_rmse(adversary=adversary, clean=x)
         mse += compute_mse(adversary=adversary, clean=x)
-        # norm_max += sum(dv_norm_inf)
     print(num_samples)
     perf = {
         "fooling_rate": fooling / num_samples,

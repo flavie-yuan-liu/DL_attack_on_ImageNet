@@ -3,14 +3,14 @@ import os
 import torch
 import torchvision.models as models
 from torch.utils.data import random_split
-from attacks import ADILR, ADIL  # , UAPPGD, FastUAP
+from attacks import ADILR, ADIL, UAPPGD, FastUAP
 import numpy as np
 import performance as perf
 from DS_ImageNet import DS_ImageNet
 from imagenet_loading import load_ImageNet, dataset_split_by_class
 import torchattacks
 import random
-import model_accuracy
+from model_accuracy import model_accuracy
 
 
 class Normalize(torch.nn.Module):
@@ -57,20 +57,16 @@ def main(args):
         norm_layer,
         model
     )
-    # model.eval()
 
     # ----------------------------------------------------------------------
     # loading imagenet data
     # ----------------------------------------------------------------------
     dataset, classes = load_ImageNet()
-    # if args.distributed:
-    #     acc = model_accuracy.run_accuracy_computing(args, dataset, model)
-    # else:
-    #     acc = model_accuracy(args, dataset, model, device=device)
-    # print("accuracy of the the model {} is {}".format(model_name, acc*100))
+    acc = model_accuracy(dataset, model, device=device)
+    print("accuracy of the the model {} is {}".format(model_name, acc*100))
 
     # Set the number of samples for training
-    num_train_per_class = 2  # set the number of samples for training 10 x number of classes
+    num_train_per_class = args.num_train_per_class  # set the number of samples for training 10 x number of classes
     num_val_per_class = 2
     num_test_per_class = 5
 
@@ -80,7 +76,7 @@ def main(args):
     train_dataset, val_dataset, test_dataset \
         = dataset_split_by_class(dataset, [num_train_per_class, num_val_per_class, num_test_per_class],
                                  number_of_classes=args.trained_classes)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=100, shuffle=False)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=10, shuffle=False)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=20, shuffle=False) #, pin_memory=True, num_workers=1)
 
     # ----------------------------------------------------------------------
@@ -89,17 +85,14 @@ def main(args):
 
     # lambda_grid_l1 = np.logspace(start=-4, stop=-4, num=1)  # params for regularized adil
     # lambda_grid_l2 = np.logspace(start=-4, stop=-4, num=1)
-    n_atoms_grid = np.array([10])
+    n_atoms_grid = np.array([100])
     # log_grid_small = np.logspace(start=-1, stop=4, num=5)
     # log_grid_step_size = np.logspace(start=-3, stop=-1, num=3)
     eps = 8/255
     norm = 'linf'
     alpha_grid = [0/255]
-    kappa_grid = [0, 5, 10, 15, 20]
+    kappa_grid = [50]
 
-    # num_trials_grid = [10]
-    # eps = [0.5]
-    # norm = 'l2'
     '''
     BIM(model, eps=8/255, alpha=2/255, steps=100),
     RFGSM(model, eps=8/255, alpha=2/255, steps=100),
@@ -118,11 +111,11 @@ def main(args):
         # 'ADiLR': perf.get_atks(model, ADILR, 'lambda_l1', lambda_grid_l1, 'lambda_l2', lambda_grid_l2,
         #                       'n_atoms', n_atoms_grid, version='stochastic', data_train=train_dataset, device=device,
         #                       batch_size=100, model_name=model_name, steps=150, attack_conditioned='atoms'),
-        'adil': perf.get_atks(model.to(device), ADIL, 'alpha', alpha_grid, 'kappa', kappa_grid, n_atoms=10,
-                              data_train=train_dataset, norm=norm, attack='supervised', eps=eps, steps=50,
+        'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, 'kappa', kappa_grid, alpha=0/255,
+                              data_train=train_dataset, norm=norm, attack='supervised', eps=eps, steps=500,
                               targeted=False, step_size=0.01, batch_size=100,
                               model_name=model_name, is_distributed=args.distributed, steps_in=1, loss='logits',
-                              method='alter', data_val=val_dataset, warm_start=False),
+                              method='gd', data_val=val_dataset, warm_start=False, steps_inference=args.steps_inference),
         # method='gd' or 'alter'; loss='ce' or 'logits
         # 'adil': perf.get_atks(model.to(device), ADIL, 'n_atoms', n_atoms_grid, data_train=train_dataset, norm=norm,
         #                       attack='supervised', eps=eps, steps=150, targeted=False, step_size=0.01, batch_size=128,
@@ -152,13 +145,15 @@ def main(args):
 
     print('Evaluation process')
     val_perf = perf.get_performance(attacks_hyper, model, val_loader, device=device)
-    param_selection_file = 'dict_model_ImageNet_version_constrained/model_adil_resultat_for_param_selecting.bin'
+    param_selection_file = f'dict_model_ImageNet_version_constrained/model_sampling_adil_inference_rlts_sampling_' \
+                           f'{num_train_per_class*args.trained_classes}_{args.steps_inference}_' \
+                           f'{args.seed}_ce.bin'
     torch.save(val_perf, param_selection_file)
 
-    # print('Test process')
-    # test_perf = perf.get_performance(attacks_hyper, model, test_loader, device=device)
-    # param_selection_file = 'dict_model_ImageNet_version_constrained/model_baseline_resultat_test.bin'
-    # torch.save(test_perf, param_selection_file)
+    print('Test process')
+    test_perf = perf.get_performance(attacks_hyper, model, test_loader, device=device)
+    param_selection_file = 'dict_model_ImageNet_version_constrained/model_adil_resultat_test_ce.bin'
+    torch.save(test_perf, param_selection_file)
 
 
 if __name__ == '__main__':
@@ -166,7 +161,7 @@ if __name__ == '__main__':
     argparser.add_argument(
         '--model', '-m',
         metavar='M',
-        default='vgg',
+        default='mobilenet',
     )
     argparser.add_argument(
         '--seed', '-s',
@@ -176,10 +171,16 @@ if __name__ == '__main__':
         help='change seed to carry out the exp'
     )
     argparser.add_argument(
+        '--num-train-per-class',
+        type=int,
+        default=1,
+        help='number per class for training'
+    )
+    argparser.add_argument(
         '--trained-classes',
         metavar='TC',
         type=int,
-        default=100,
+        default=1000,
         help='number of class for training'
     )
     argparser.add_argument(
@@ -195,11 +196,16 @@ if __name__ == '__main__':
         default=0,
         help='select number of class for training, default is 0'
     )
+    argparser.add_argument(
+        '--steps-inference',
+        type=int,
+        default=100,
+        help='select number of steps for inference, default is 100'
+    )
 
     args = argparser.parse_args()
-
-    #for seed in range(1, 6):
     seed = args.seed  # Do from 1 to 5
+    print(seed)
     torch.random.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
