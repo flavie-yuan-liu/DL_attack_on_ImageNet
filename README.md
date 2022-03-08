@@ -3,11 +3,11 @@
 
 Implementation of attack learning algorithm based on dictionary leanring, specially for the Imagenet Dataset. 
 <p align="center">
-  <img src="https://github.com/flavie-yuan-liu/DL_attack_on_ImageNet/blob/main/attack_samples.png" width="350", height="120", title="ADiL">
+  <img src="https://github.com/flavie-yuan-liu/DL_attack_on_ImageNet/blob/main/attack_samples.png" width="650", title="ADiL">
 </p>
 
-> We have the trained model on 6 deep model, [download here]()
-> To see a simple example of adversarial image generation with our model, just run
+> We have the trained model on 6 deep model ([download here]()).
+> To see a simple example of adversarial image generation with our model (as shown in above), just run
 ```
 python main.py
 ```
