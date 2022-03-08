@@ -3,7 +3,7 @@
 
 Implementation of attack learning algorithm based on dictionary leanring, specially for the Imagenet Dataset. 
 <p align="center">
-  <img src="" width="350" title="ADiL">
+  <img src="https://github.com/flavie-yuan-liu/DL_attack_on_ImageNet/blob/main/attack_samples.png" width="350", height="120", title="ADiL">
 </p>
 
 > We have the trained model on 6 deep model, [download here]()
