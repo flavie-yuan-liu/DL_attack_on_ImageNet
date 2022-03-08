@@ -497,6 +497,69 @@ class ADIL(Attack):
 
         return adv_images_best, dv_norm_inf
 
+    def forward_supervised_DDrague(self, images, labels, d):
+
+        """ Learn the adversarial dictionary by distributed data parallel"""
+        # Shape parameters
+        n_img = len(labels)
+
+        # Other parameters
+        coeff = 1. if self.targeted else -1.  # Targeted vs. Untargeted attacks
+
+        # Function
+        criterion = nn.CrossEntropyLoss(reduction='mean')
+
+        # Initialization of the coding vectors v
+        v = torch.zeros(n_img, self.n_atoms, device=self.device)
+
+        # Pre_calculate dtd
+        dtd = torch.tensordot(d, d, dims=([0, 1, 2], [0, 1, 2]))
+        dtd_inv = dtd.inverse()
+        d_drg = torch.tensordot(dtd_inv, d, dims=([1], [3]))
+
+        # Initialization of intermediate variables
+        loss_track = []
+
+        z = nn.Parameter(torch.zeros_like(images), requires_grad=True)
+        optimise = torch.optim.AdamW([z], lr=1e-2)
+
+        # Algorithm for image-wise code computing
+        for iteration in range(self.steps_inference):
+            # Gradients and loss computations
+            loss_full = 0
+            optimise.zero_grad()
+
+            # Load data
+            images, labels = images.to(device=self.device), labels.to(device=self.device)
+            labels = self.model(images).argmax(dim=-1)
+            # compute loss with model
+            v = torch.tensordot(z, d_drg, dims=([1, 2, 3], [1, 2, 3]))
+            dv = torch.tensordot(v, d, dims=([1], [3]))
+            output = self.model(images + dv)
+
+            if self.loss == 'ce':
+                loss = coeff * criterion(output, labels)
+            elif self.loss == 'logits':
+                loss = self.f_loss(output, labels).sum()
+
+            loss.backward()
+            z_old = z.detach().clone()
+
+            optimise.step()
+            z.data.copy_(torch.clamp(z.data, min=-self.eps, max=self.eps))
+
+            loss_track.append(loss)
+
+            if (z - z_old).abs().max() < 1e-6:
+                break
+
+        v = torch.tensordot(z, d_drg, dims=([1, 2, 3], [1, 2, 3]))
+        dv = torch.tensordot(v, d, dims=([1], [3]))
+        dv = torch.clamp(dv, min=-self.eps, max=self.eps)
+
+        adversary = images + dv
+        return torch.clamp(adversary, min=0, max=1)
+
     def forward_supervised_AdamW(self, images, labels, d, model='train'):
         """ Learn the adversarial dictionary by distributed data parallel"""
         # Shape parameters
