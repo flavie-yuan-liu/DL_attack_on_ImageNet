@@ -421,7 +421,6 @@ class ADIL(Attack):
 
         cleanup()
 
-
     def forward(self, images, labels):
 
         images = images.to(self.device)
@@ -439,8 +438,6 @@ class ADIL(Attack):
 
         if self.attack == 'supervised':
             ''' Supervised attack where the coding vectors are optimized '''
-            # adv_img = self.forward_supervised_new(images, labels)
-            # adv_img = self.forward_supervised_AdamW(images, labels, self.dictionary, 'val')
             adv_img = self.forward_supervised_DDrague(images, labels, self.dictionary)
             self.dictionary = None
             return adv_img
@@ -558,6 +555,7 @@ class ADIL(Attack):
 
         v = torch.tensordot(z, d_drg, dims=([1, 2, 3], [1, 2, 3]))
         dv = torch.tensordot(v, d, dims=([1], [3]))
+        dv = torch.clamp(dv, min=-self.eps, max=self.eps)
 
         adversary = images + dv
         return torch.clamp(adversary, min=0, max=1)
