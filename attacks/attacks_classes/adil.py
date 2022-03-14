@@ -27,9 +27,11 @@ class Attack_dict_model(nn.Module):
         return output
 
     def update_v(self):
+        # project v on l1 ball, i.e., ||v||_1 <= eps
         self.v.data.copy_(project_onto_l1_ball(self.v.data, self.eps))
 
     def update_d(self):
+        # project D on l_inf with ||D||_inf <= 1 
         self.d.data.copy_(torch.clamp(self.d.data, min=-1, max=1))
 
 
@@ -60,7 +62,7 @@ class ADIL(Attack):
 
     def __init__(self, model, eps=None, steps=5e2, norm='linf', targeted=False, n_atoms=100, batch_size=100,
                  data_train=None, data_val=None, trials=10, attack='supervised', model_name=None, step_size=0.01,
-                 is_distributed=False, steps_in=None, loss='ce', method='gd', warm_start=False, alpha=0/255, kappa=50,
+                 is_distributed=False, steps_in=None, loss='ce', method='gd', warm_start=False, kappa=50,
                  steps_inference=30):
 
         super().__init__("ADIL", model.eval())
@@ -72,7 +74,6 @@ class ADIL(Attack):
         self.targeted = targeted
         self.attack = attack
         self.trials = trials
-        self.alpha = alpha
         self.step_size = step_size
         self.steps_inference = steps_inference
 
@@ -94,9 +95,9 @@ class ADIL(Attack):
             if is_distributed:
                 self.learn_dictionary_distributed(data_train)
             else:
-                if method == 'gd':
+                if method == 'gd': # simple gradient descent method
                     self.learn_dictionary_a(dataset=data_train, val=data_val, warm_start=warm_start)
-                elif method == 'alter':
+                elif method == 'alter': # alternating method 
                     self.learn_dictionary_b(dataset=data_train, val=data_val, warm_start=warm_start)
 
     def f_loss(self, outputs, labels):
@@ -112,7 +113,9 @@ class ADIL(Attack):
 
     def learn_dictionary_a(self, dataset, val, warm_start):
         """ Learn the adversarial dictionary """
+        # dataset.indexed determine if output of index of data is necessairy
         dataset.indexed = False
+        
         # Shape parameters
         n_img = len(dataset)
         x, _ = next(iter(dataset))
@@ -122,14 +125,14 @@ class ADIL(Attack):
         batch_size = n_img if self.batch_size is None else self.batch_size
         coeff = 1. if self.targeted else -1.
 
-        # Data loader
+        # Data loader and make data.indexed True
         dataset.indexed = True
         data_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True,
                                                   num_workers=0)
         val_loader = torch.utils.data.DataLoader(val, batch_size=batch_size, shuffle=True, pin_memory=True,
                                                  num_workers=0)
 
-        # Function
+        # cross-entropy loss Function
         criterion = nn.CrossEntropyLoss(reduction='sum')
 
         # Initialization of the dictionary D and coding vectors v
@@ -146,24 +149,26 @@ class ADIL(Attack):
 
         v = self.projection_v(torch.rand(n_img, self.n_atoms, device=self.device))
 
-        # initialized model
+        # initialized model and optimiser
         adil_model = Attack_dict_model(d, v, self.eps).to(self.device)
         optimise = torch.optim.AdamW(adil_model.parameters(), lr=self.step_size)
 
         # Initialization of intermediate variables
         loss_all = []
         fooling_rate_all = []
+        
         # Algorithm
         adil_model.train()
         bar = trange(int(self.steps))
         for iteration in bar:
+            
             # Gradients and loss computations
-            adil_model.train()
             loss_full = 0
             fooling_sample = 0
             for index, x, label in data_loader:
                 # Load data
                 x, label = x.to(device=self.device), label.to(device=self.device)
+                # get the output of the model
                 label = self.model(x).argmax(dim=-1)
 
                 # compute loss with model
@@ -176,6 +181,7 @@ class ADIL(Attack):
                 elif self.loss == 'logits':
                     loss = self.f_loss(output, label).sum()
 
+                # constrained optimisation
                 loss.backward()
                 optimise.step()
                 adil_model.update_v()
@@ -184,10 +190,12 @@ class ADIL(Attack):
                 with torch.no_grad():
                     loss_full += loss
 
+            # loss and fooling rate tracking
             loss_all.append(loss_full.item()/n_img)
             fooling_rate_all.append(fooling_sample.item()/n_img)
             print(loss_all[-1], fooling_sample/n_img)
 
+            # evaluate on validation set
             fool_on_valset = 0
             adil_model.eval()
             for x, label in val_loader:
@@ -439,11 +447,13 @@ class ADIL(Attack):
         if self.attack == 'supervised':
             ''' Supervised attack where the coding vectors are optimized '''
             adv_img = self.forward_supervised_DDrague(images, labels, self.dictionary)
+            # release memory
             self.dictionary = None
             return adv_img
         else:
             ''' Unsupervised attack where the coding vectors are sampled '''
             adv_img = self.forward_unsupervised(images)
+            # release memory
             self.dictionary = None
             return adv_img
 
@@ -466,8 +476,6 @@ class ADIL(Attack):
             # Sample adversarial images
             dv_norm_inf = []
             v = self.sample_sphere(n_samples).to(device=self.device)
-            # v = torch.zeros(n_samples, self.n_atoms, device=self.device)
-            # v[:, n_a//2] = self.eps if n_a%2 == 0 else -self.eps
             adv_images = torch.zeros_like(images)
             for ind in range(n_samples):
                 dv = torch.tensordot(v[ind], self.dictionary.to(device=self.device), dims=([0], [3]))
@@ -498,8 +506,7 @@ class ADIL(Attack):
         return adv_images_best, dv_norm_inf
 
     def forward_supervised_DDrague(self, images, labels, d):
-
-        """ Learn the adversarial dictionary by distributed data parallel"""
+        """ Learn z by supposing z = dv """
         # Shape parameters
         n_img = len(labels)
 
@@ -512,7 +519,7 @@ class ADIL(Attack):
         # Initialization of the coding vectors v
         v = torch.zeros(n_img, self.n_atoms, device=self.device)
 
-        # Pre_calculate dtd
+        # Pre_calculate ddrague
         dtd = torch.tensordot(d, d, dims=([0, 1, 2], [0, 1, 2]))
         dtd_inv = dtd.inverse()
         d_drg = torch.tensordot(dtd_inv, d, dims=([1], [3]))
@@ -525,13 +532,12 @@ class ADIL(Attack):
 
         # Algorithm for image-wise code computing
         for iteration in range(self.steps_inference):
-            # Gradients and loss computations
-            loss_full = 0
             optimise.zero_grad()
 
             # Load data
             images, labels = images.to(device=self.device), labels.to(device=self.device)
             labels = self.model(images).argmax(dim=-1)
+            
             # compute loss with model
             v = torch.tensordot(z, d_drg, dims=([1, 2, 3], [1, 2, 3]))
             dv = torch.tensordot(v, d, dims=([1], [3]))
@@ -553,15 +559,15 @@ class ADIL(Attack):
             if (z - z_old).abs().max() < 1e-6:
                 break
 
+        # calculate dv with z
         v = torch.tensordot(z, d_drg, dims=([1, 2, 3], [1, 2, 3]))
         dv = torch.tensordot(v, d, dims=([1], [3]))
-        dv = torch.clamp(dv, min=-self.eps, max=self.eps)
 
         adversary = images + dv
         return torch.clamp(adversary, min=0, max=1)
 
     def forward_supervised_AdamW(self, images, labels, d, model='train'):
-        """ Learn the adversarial dictionary by distributed data parallel"""
+        """ learn v """
         # Shape parameters
         n_img = len(labels)
 
@@ -644,13 +650,6 @@ class ADIL(Attack):
             return self.eps * torch.div(var, v_norm)
         elif self.norm == 'linf':
             """ Sample 'sparse' v on the l1-sphere """
-            m = torch.distributions.uniform.Uniform(torch.tensor([self.alpha]), torch.tensor([2*self.alpha]))
+            m = torch.distributions.uniform.Uniform(torch.tensor([self.eps]), torch.tensor([2*self.eps]))
             var_raw = m.sample(sample_shape=[n_samples, self.n_atoms])[:, :, 0]
             return self.projection_v(var_raw)
-
-    def get_target(self, data_loader):
-        """ Output the target or label to fool depending on self.targeted """
-        target = []
-        for index, (x, y) in enumerate(data_loader):
-            target.append(get_target(x.to(device=self.device), y.to(device=self.device), self.targeted, self.model))
-        return target
