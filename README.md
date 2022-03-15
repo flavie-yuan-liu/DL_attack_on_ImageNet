@@ -6,7 +6,7 @@ Implementation of attack learning algorithm based on dictionary leanring, specia
   <img src="https://github.com/flavie-yuan-liu/DL_attack_on_ImageNet/blob/main/attack_samples.png" width="650", title="ADiL">
 </p>
 
-> We have the trained model on 6 deep model ([download here]()).
+> We have the trained model on 6 deep model ([download here](https://drive.google.com/drive/folders/1P-raQEaFttcv81q2JoujWTXwez440cQM?usp=sharing)).
 > To see a simple example of adversarial image generation with our model (as shown in above), just run
 ```
 python main.py
